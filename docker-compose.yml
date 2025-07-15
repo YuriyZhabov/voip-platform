@@ -1,0 +1,86 @@
+services:
+  asterisk:
+    build:
+      context: ./docker/asterisk
+      dockerfile: Dockerfile
+    container_name: asterisk-pbx
+    hostname: asterisk-pbx
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./configs/asterisk:/etc/asterisk:ro
+      - ./data/asterisk:/var/lib/asterisk
+      - ./data/logs/asterisk:/var/log/asterisk
+      - asterisk-sounds:/var/lib/asterisk/sounds
+    environment:
+      - TZ=Europe/Moscow
+      - ASTERISK_USER=${ASTERISK_USER:-asterisk}
+      - EXTERNAL_IP=${LIVEKIT_PUBLIC_IP}
+      - NOVOFON_USERNAME=${NOVOFON_USERNAME}
+      - NOVOFON_PASSWORD=${NOVOFON_PASSWORD}
+      - NOVOFON_NUMBER=${NOVOFON_NUMBER}
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  livekit-agent:
+    build:
+      context: ./configs/agent
+      dockerfile: Dockerfile
+    container_name: livekit-agent
+    hostname: livekit-agent
+    restart: unless-stopped
+    volumes:
+      - ./configs/agent:/app
+      - ./data/agent:/data
+      - ./data/logs/agent:/logs
+    environment:
+      - LIVEKIT_URL=${LIVEKIT_URL}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - CARTESIA_API_KEY=${CARTESIA_API_KEY}
+      - PYTHONUNBUFFERED=1
+      - TZ=Europe/Moscow
+    depends_on:
+      - redis
+    command: ["start"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis-cache
+    hostname: redis-cache
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - ./configs/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  asterisk-sounds:
+  redis-data:
+    driver: local
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
