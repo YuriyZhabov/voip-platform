@@ -46,5 +46,5 @@ Thumbs.db
 *.tmp
 *.temp
 
-# Environment variables (закомментировано, так как .env нужен для примера)
-# .env
+# Environment variables
+.env
