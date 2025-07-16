@@ -1,4 +1,44 @@
 services:
+  traefik:
+    image: traefik:v3.4
+    container_name: traefik-proxy
+    hostname: traefik-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik Dashboard
+      - "8089:8089"  # WebSocket для WebRTC
+      - "5060:5060/udp"  # SIP UDP
+      - "5160:5160/tcp"  # SIP TCP
+      - "18000-18100:18000-18100/udp"  # RTP диапазон
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-letsencrypt:/letsencrypt
+      - traefik-logs:/var/log/traefik
+      - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./docker/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    environment:
+      - TZ=Europe/Moscow
+    command: --configFile=/etc/traefik/traefik.yml
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.stellaragents.ru`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.service=api@internal"
+      # Basic Auth for Dashboard
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=admin:$$2y$$05$$frVRoEe0Osjaj62zKs8Wl.6N7Re3w/6pRGdWSqDli9nKZmt5JVA0m"
+      - "traefik.http.routers.traefik.middlewares=traefik-auth"
+
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   freepbx:
     build:
       context: ./docker/freepbx
@@ -6,12 +46,12 @@ services:
     container_name: freepbx-server
     hostname: freepbx-server
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "5060:5060/udp"
-      - "5061:5061"
-      - "18000-18100:18000-18100/udp"
+    # Порты проксируются через Traefik
+    expose:
+      - "80"     # HTTP для админки
+      - "8089"   # WebSocket для WebRTC
+      - "5060"   # SIP UDP
+      - "5160"   # SIP TCP
     volumes:
       - freepbx-data:/data
       - freepbx-logs:/var/log
@@ -32,9 +72,46 @@ services:
       - RTP_START=18000
       - RTP_FINISH=18100
       - WEBROOT=/admin
+    labels:
+      - "traefik.enable=true"
+      
+      # HTTP Admin GUI
+      - "traefik.http.routers.freepbx-admin.rule=Host(`pbx.stellaragents.ru`)"
+      - "traefik.http.routers.freepbx-admin.entrypoints=websecure"
+      - "traefik.http.routers.freepbx-admin.tls.certresolver=letsencrypt"
+      - "traefik.http.services.freepbx-admin.loadbalancer.server.port=80"
+      
+      # Временный маршрут для тестирования с localhost
+      - "traefik.http.routers.freepbx-test.rule=Host(`localhost`)"
+      - "traefik.http.routers.freepbx-test.entrypoints=websecure"
+      - "traefik.http.routers.freepbx-test.tls=true"
+      - "traefik.http.routers.freepbx-test.service=freepbx-admin"
+      
+      # WebSocket для WebRTC (WSS 8089)
+      - "traefik.http.routers.freepbx-wss.rule=Host(`pbx.stellaragents.ru`) && Path(`/ws`)"
+      - "traefik.http.routers.freepbx-wss.entrypoints=wss"
+      - "traefik.http.routers.freepbx-wss.tls.certresolver=letsencrypt"
+      - "traefik.http.services.freepbx-wss.loadbalancer.server.port=8089"
+      
+      # SIP UDP 5060
+      - "traefik.udp.routers.sip-udp.entrypoints=sip-udp"
+      - "traefik.udp.routers.sip-udp.service=sip-udp-svc"
+      - "traefik.udp.services.sip-udp-svc.loadbalancer.server.port=5060"
+      
+      # SIP TCP 5160
+      - "traefik.tcp.routers.sip-tcp.entrypoints=sip-tcp"
+      - "traefik.tcp.routers.sip-tcp.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.sip-tcp.service=sip-tcp-svc"
+      - "traefik.tcp.services.sip-tcp-svc.loadbalancer.server.port=5160"
+
+
+    networks:
+      - traefik-public
+      - default
     depends_on:
       - freepbx-db
       - redis
+      - traefik
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/admin"]
       interval: 60s
@@ -103,6 +180,10 @@ services:
       retries: 3
 
 volumes:
+  traefik-letsencrypt:
+    driver: local
+  traefik-logs:
+    driver: local
   freepbx-data:
     driver: local
   freepbx-logs:
@@ -120,3 +201,5 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/16
+  traefik-public:
+    external: true

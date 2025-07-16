@@ -1,0 +1,59 @@
+http:
+  middlewares:
+    # Безопасные заголовки
+    secure-headers:
+      headers:
+        accessControlAllowMethods:
+          - GET
+          - OPTIONS
+          - PUT
+          - POST
+          - DELETE
+        accessControlMaxAge: 100
+        hostsProxyHeaders:
+          - "X-Forwarded-Host"
+        referrerPolicy: "same-origin"
+        sslRedirect: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        forceSTSHeader: true
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        customRequestHeaders:
+          X-Forwarded-Proto: "https"
+
+    # Аутентификация для Traefik Dashboard
+    auth:
+      basicAuth:
+        users:
+          # admin:TraefikAdmin2025!
+          - "admin:$2y$05$frVRoEe0Osjaj62zKs8Wl.6N7Re3w/6pRGdWSqDli9nKZmt5JVA0m"
+
+    # Rate limiting
+    rate-limit:
+      rateLimit:
+        burst: 100
+        average: 50
+
+    # FreePBX Admin middleware
+    mw_freepbxadmin:
+      addPrefix:
+        prefix: "/admin"
+
+    # FreePBX UCP middleware  
+    mw_freepbxucp:
+      addPrefix:
+        prefix: "/ucp"
+
+tls:
+  options:
+    default:
+      sslProtocols:
+        - "TLSv1.2"
+        - "TLSv1.3"
+      cipherSuites:
+        - "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+        - "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"
+        - "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
