@@ -50,11 +50,7 @@ services:
     depends_on:
       - redis
     command: ["start"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+
 
   redis:
     image: redis:7-alpine
