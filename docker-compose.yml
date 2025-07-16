@@ -61,6 +61,7 @@ services:
       - ./configs/apache/freepbx-proxy.conf:/etc/apache2/conf-available/freepbx-proxy.conf:ro
       - ./configs/apache/freepbx-vhost.conf:/etc/apache2/sites-available/freepbx.conf:ro
       - ./configs/apache/init-apache.sh:/usr/local/bin/init-apache.sh:ro
+      - ./configs/apache/fix-freepbx-permissions.sh:/usr/local/bin/fix-freepbx-permissions.sh:ro
     environment:
       - TZ=Europe/Moscow
       - LIVEKIT_PUBLIC_IP=${LIVEKIT_PUBLIC_IP}
