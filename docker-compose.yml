@@ -59,6 +59,7 @@ services:
       - ./data/freepbx/backup:/backup
       - ./configs/apache/freepbx.conf:/etc/apache2/conf-available/freepbx.conf:ro
       - ./configs/apache/freepbx-proxy.conf:/etc/apache2/conf-available/freepbx-proxy.conf:ro
+      - ./configs/apache/freepbx-vhost.conf:/etc/apache2/sites-available/freepbx.conf:ro
       - ./configs/apache/init-apache.sh:/usr/local/bin/init-apache.sh:ro
     environment:
       - TZ=Europe/Moscow
