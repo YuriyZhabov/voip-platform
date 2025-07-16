@@ -1,0 +1,197 @@
+{
+  "log_registry": {
+    "description": "Реестр всех логов системы VoIP Platform",
+    "version": "1.0",
+    "last_updated": "2025-07-16",
+    "containers": {
+      "freepbx-server": {
+        "description": "FreePBX и Asterisk логи",
+        "logs": {
+          "asterisk": {
+            "path": "/var/log/asterisk",
+            "files": [
+              {
+                "name": "freepbx.log",
+                "description": "Основной лог FreePBX",
+                "critical": true,
+                "max_size_mb": 50
+              },
+              {
+                "name": "full",
+                "description": "Полный лог Asterisk",
+                "critical": true,
+                "max_size_mb": 100
+              },
+              {
+                "name": "freepbx_security.log",
+                "description": "Лог безопасности FreePBX",
+                "critical": true,
+                "max_size_mb": 10
+              },
+              {
+                "name": "queue_log",
+                "description": "Лог очередей Asterisk",
+                "critical": false,
+                "max_size_mb": 20
+              },
+              {
+                "name": "core-fastagi_out.log",
+                "description": "FastAGI сервер вывод",
+                "critical": false,
+                "max_size_mb": 10
+              },
+              {
+                "name": "core-fastagi_err.log",
+                "description": "FastAGI сервер ошибки",
+                "critical": true,
+                "max_size_mb": 10
+              },
+              {
+                "name": "core-calltransfer-monitor_out.log",
+                "description": "Call Transfer Monitor вывод",
+                "critical": false,
+                "max_size_mb": 20
+              },
+              {
+                "name": "core-calltransfer-monitor_err.log",
+                "description": "Call Transfer Monitor ошибки",
+                "critical": true,
+                "max_size_mb": 10
+              },
+              {
+                "name": "ucp_out.log",
+                "description": "UCP сервер вывод",
+                "critical": false,
+                "max_size_mb": 20
+              },
+              {
+                "name": "ucp_err.log",
+                "description": "UCP сервер ошибки",
+                "critical": true,
+                "max_size_mb": 10
+              },
+              {
+                "name": "h323_log",
+                "description": "H323 протокол лог",
+                "critical": false,
+                "max_size_mb": 5
+              }
+            ]
+          },
+          "apache": {
+            "path": "/var/log/apache2",
+            "files": [
+              {
+                "name": "freepbx_access.log",
+                "description": "Apache доступ к FreePBX",
+                "critical": false,
+                "max_size_mb": 30
+              },
+              {
+                "name": "freepbx_error.log",
+                "description": "Apache ошибки FreePBX",
+                "critical": true,
+                "max_size_mb": 20
+              },
+              {
+                "name": "access.log",
+                "description": "Apache общий доступ",
+                "critical": false,
+                "max_size_mb": 20
+              },
+              {
+                "name": "error.log",
+                "description": "Apache общие ошибки",
+                "critical": true,
+                "max_size_mb": 20
+              }
+            ]
+          },
+          "system": {
+            "path": "/var/log",
+            "files": [
+              {
+                "name": "fail2ban/fail2ban.log",
+                "description": "Fail2ban защита",
+                "critical": true,
+                "max_size_mb": 10
+              },
+              {
+                "name": "zabbix/zabbix_agentd.log",
+                "description": "Zabbix агент мониторинга",
+                "critical": false,
+                "max_size_mb": 10
+              }
+            ]
+          }
+        }
+      },
+      "traefik-proxy": {
+        "description": "Traefik reverse proxy логи",
+        "logs": {
+          "traefik": {
+            "path": "/var/log/traefik",
+            "files": [
+              {
+                "name": "traefik.log",
+                "description": "Основной лог Traefik",
+                "critical": true,
+                "max_size_mb": 30
+              },
+              {
+                "name": "access.log",
+                "description": "Лог доступа Traefik",
+                "critical": false,
+                "max_size_mb": 50
+              }
+            ]
+          }
+        }
+      },
+      "freepbx-database": {
+        "description": "MariaDB база данных логи",
+        "logs": {
+          "mysql": {
+            "path": "/var/log/mysql",
+            "files": [
+              {
+                "name": "error.log",
+                "description": "MySQL ошибки",
+                "critical": true,
+                "max_size_mb": 20
+              },
+              {
+                "name": "mysql.log",
+                "description": "MySQL общий лог",
+                "critical": false,
+                "max_size_mb": 30
+              }
+            ]
+          }
+        }
+      },
+      "redis-cache": {
+        "description": "Redis кэш логи",
+        "logs": {
+          "redis": {
+            "path": "/var/log/redis",
+            "files": [
+              {
+                "name": "redis-server.log",
+                "description": "Redis сервер лог",
+                "critical": false,
+                "max_size_mb": 10
+              }
+            ]
+          }
+        }
+      }
+    },
+    "archive_settings": {
+      "max_archive_size_mb": 500,
+      "retention_days": 30,
+      "compression": "gzip",
+      "archive_frequency": "weekly"
+    }
+  }
+}
