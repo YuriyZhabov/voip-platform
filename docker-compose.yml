@@ -57,6 +57,9 @@ services:
       - freepbx-logs:/var/log
       - freepbx-www:/var/www/html
       - ./data/freepbx/backup:/backup
+      - ./configs/apache/freepbx.conf:/etc/apache2/conf-available/freepbx.conf:ro
+      - ./configs/apache/freepbx-proxy.conf:/etc/apache2/conf-available/freepbx-proxy.conf:ro
+      - ./configs/apache/init-apache.sh:/usr/local/bin/init-apache.sh:ro
     environment:
       - TZ=Europe/Moscow
       - LIVEKIT_PUBLIC_IP=${LIVEKIT_PUBLIC_IP}
@@ -75,17 +78,24 @@ services:
     labels:
       - "traefik.enable=true"
       
-      # HTTP Admin GUI
+      # HTTP Admin GUI - основной маршрут
       - "traefik.http.routers.freepbx-admin.rule=Host(`pbx.stellaragents.ru`)"
       - "traefik.http.routers.freepbx-admin.entrypoints=websecure"
       - "traefik.http.routers.freepbx-admin.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.freepbx-admin.service=freepbx-admin"
       - "traefik.http.services.freepbx-admin.loadbalancer.server.port=80"
       
-      # Временный маршрут для тестирования с localhost
-      - "traefik.http.routers.freepbx-test.rule=Host(`localhost`)"
-      - "traefik.http.routers.freepbx-test.entrypoints=websecure"
-      - "traefik.http.routers.freepbx-test.tls=true"
-      - "traefik.http.routers.freepbx-test.service=freepbx-admin"
+      # Middleware для правильных заголовков прокси
+      - "traefik.http.middlewares.freepbx-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+      - "traefik.http.middlewares.freepbx-headers.headers.customrequestheaders.X-Forwarded-Port=443"
+      - "traefik.http.middlewares.freepbx-headers.headers.customrequestheaders.X-Forwarded-Host=pbx.stellaragents.ru"
+      
+      # Редирект с корня на /admin
+      - "traefik.http.middlewares.freepbx-redirect.redirectregex.regex=^https://pbx\\.stellaragents\\.ru/?$$"
+      - "traefik.http.middlewares.freepbx-redirect.redirectregex.replacement=https://pbx.stellaragents.ru/admin/"
+      
+      # Применяем middleware
+      - "traefik.http.routers.freepbx-admin.middlewares=freepbx-redirect,freepbx-headers"
       
       # WebSocket для WebRTC (WSS 8089)
       - "traefik.http.routers.freepbx-wss.rule=Host(`pbx.stellaragents.ru`) && Path(`/ws`)"
