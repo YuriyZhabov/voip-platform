@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import threading
 from typing import Annotated
 from aiohttp import web
 
@@ -20,6 +21,14 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Импорт нашего ARI клиента
+try:
+    from ari_client import EnhancedARIClient
+    ARI_AVAILABLE = True
+except ImportError:
+    logger.warning("ARI клиент недоступен")
+    ARI_AVAILABLE = False
 
 class HealthCheckServer:
     """HTTP сервер для health check"""
@@ -89,12 +98,29 @@ async def get_current_time() -> str:
         logger.error(f"Ошибка получения времени: {e}")
         return "Не удалось получить текущее время"
 
+async def start_ari_client():
+    """Запуск ARI клиента в отдельной задаче"""
+    if not ARI_AVAILABLE:
+        logger.warning("ARI клиент недоступен, пропускаем запуск")
+        return
+    
+    try:
+        ari_client = EnhancedARIClient()
+        await ari_client.start()
+    except Exception as e:
+        logger.error(f"Ошибка запуска ARI клиента: {e}")
+
 async def entrypoint(ctx: JobContext):
     """Точка входа для агента"""
     try:
         # Запускаем health check сервер
         health_server = HealthCheckServer()
         await health_server.start()
+        
+        # Запускаем ARI клиент в фоновой задаче
+        if ARI_AVAILABLE:
+            ari_task = asyncio.create_task(start_ari_client())
+            logger.info("ARI клиент запущен в фоновом режиме")
         
         # Подключаемся к комнате
         await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)

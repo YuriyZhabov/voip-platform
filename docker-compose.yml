@@ -69,9 +69,9 @@ services:
       - NOVOFON_PASSWORD=${NOVOFON_PASSWORD}
       - NOVOFON_NUMBER=${NOVOFON_NUMBER}
       - DB_HOST=freepbx-db
-      - DB_NAME=asterisk
-      - DB_USER=asterisk
-      - DB_PASS=asterisk_password
+      - DB_NAME=${MYSQL_DATABASE}
+      - DB_USER=${MYSQL_USER}
+      - DB_PASS=${MYSQL_PASSWORD}
       - ENABLE_CRON=TRUE
       - ENABLE_SMTP=FALSE
       - RTP_START=18000
@@ -138,10 +138,10 @@ services:
     volumes:
       - freepbx-db:/var/lib/mysql
     environment:
-      - MYSQL_ROOT_PASSWORD=root_password
-      - MYSQL_DATABASE=asterisk
-      - MYSQL_USER=asterisk
-      - MYSQL_PASSWORD=asterisk_password
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - TZ=Europe/Moscow
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
