@@ -60,7 +60,7 @@ apply_asterisk_configs() {
     
     # Перезагрузка конфигурации
     docker exec freepbx-server asterisk -rx "core reload"
-    docker exec freepbx-server asterisk -rx "pjsip reload"
+    docker exec freepbx-server asterisk -rx "module reload res_pjsip.so"
     
     log "Конфигурации Asterisk применены"
 }

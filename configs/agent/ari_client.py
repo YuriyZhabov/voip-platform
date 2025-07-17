@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 class EnhancedARIClient:
     def __init__(self):
         self.ari_url = os.getenv('ARI_URL', 'http://freepbx-server:8088')
-        self.ari_username = os.getenv('ARI_USERNAME', 'livekit')
-        self.ari_password = os.getenv('ARI_PASSWORD', 'livekit_secret')
+        self.ari_username = os.getenv('ARI_USERNAME', 'livekit-agent')
+        self.ari_password = os.getenv('ARI_PASSWORD', 'livekit_ari_secret')
         self.app_name = 'livekit-agent'
         
         # LiveKit настройки
@@ -61,9 +61,9 @@ class EnhancedARIClient:
         ws_url = f"{self.ari_url.replace('http', 'ws')}/ari/events"
         
         params = {
-            'api_key': self.ari_username,
-            'api_secret': self.ari_password,
-            'app': self.app_name
+            'api_key': 'livekit-agent',
+            'api_secret': 'livekit_ari_secret',
+            'app': 'livekit-agent'
         }
         
         # Формирование URL с параметрами
