@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import datetime
 from typing import Annotated
 from aiohttp import web
 
@@ -10,9 +11,11 @@ from livekit.agents import (
     WorkerOptions,
     cli,
     llm,
+    AgentSession,
+    Agent,
 )
 from livekit.plugins import deepgram, openai, cartesia, silero
-from livekit import rtc
+from livekit import rtc, api
 
 # Настройка логирования
 logging.basicConfig(
@@ -96,21 +99,123 @@ async def entrypoint(ctx: JobContext):
         health_server = HealthCheckServer()
         await health_server.start()
         
-        # Подключаемся к комнате
-        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+        # Генерируем JWT токен для авторизации
+        api_key = os.getenv("LIVEKIT_API_KEY")
+        api_secret = os.getenv("LIVEKIT_API_SECRET")
+        
+        if not api_key or not api_secret:
+            logger.error("LIVEKIT_API_KEY или LIVEKIT_API_SECRET не установлены")
+            raise ValueError("Отсутствуют необходимые переменные окружения для LiveKit")
+        
+        logger.info(f"Генерация JWT токена для LiveKit с API ключом: {api_key[:5]}...")
+        
+        # Создаем токен с правами на подключение к комнате
+        video_grants = api.VideoGrants(
+            room_join=True,
+            room="test",  # Имя комнаты, к которой подключаемся
+            can_publish=True,
+            can_subscribe=True,
+            can_publish_data=True
+        )
+        
+        token = (
+            api.AccessToken(api_key=api_key, api_secret=api_secret)
+            .with_identity("livekit-agent")
+            .with_name("LiveKit Voice Agent")
+            .with_ttl(datetime.timedelta(hours=6))
+            .with_grants(video_grants)
+            .to_jwt()
+        )
+        
+        logger.info(f"JWT токен успешно сгенерирован: {token[:20]}...")
+        
+        # Устанавливаем токен в переменную окружения для использования в SDK
+        os.environ["LIVEKIT_TOKEN"] = token
+        
+        # 1. Подключаемся к комнате как участник-бот с токеном
+        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY, token=token)
         logger.info(f"Подключились к комнате: {ctx.room.name}")
+        
+        # Ждем первого участника
+        participant = await ctx.wait_for_participant()
+        logger.info(f"Участник подключился: {participant.identity}")
 
-        # Настраиваем обработчики событий
-        @ctx.room.on("participant_connected")
-        def on_participant_connected(participant: rtc.RemoteParticipant):
-            logger.info(f"Участник подключился: {participant.identity}")
+        # 2. Создаём сессию с моделями
+        session = AgentSession(
+            stt=deepgram.STT(),                        # распознавание речи
+            llm=openai.realtime.RealtimeModel(voice="alloy"),
+            tts=cartesia.TTS(),                        # озвучка
+        )
 
-        @ctx.room.on("participant_disconnected") 
-        def on_participant_disconnected(participant: rtc.RemoteParticipant):
-            logger.info(f"Участник отключился: {participant.identity}")
+        # Инструкции для агента
+        instructions = """
+        Ты доброжелательный голосовой ассистент компании. 
+        Ты можешь помочь с информацией о погоде и текущем времени.
+        Отвечай кратко и по делу, но всегда вежливо.
+        Если тебя спрашивают о погоде, используй функцию get_weather.
+        Если тебя спрашивают о времени, используй функцию get_current_time.
+        """
 
-        # Простое логирование для проверки работы
-        logger.info("LiveKit Agent успешно запущен и готов к работе")
+        # Определение инструментов
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Получить информацию о погоде в указанном месте",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "Название города или места"
+                            }
+                        },
+                        "required": ["location"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Получить текущее время",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            }
+        ]
+
+        # 3. Запускаем агента с инструкциями
+        agent = Agent(instructions=instructions)
+        
+        # Обработчик вызова инструментов
+        @agent.on("tool_called")
+        async def on_tool_called(tool_call):
+            logger.info(f"Вызов инструмента: {tool_call.name}")
+            
+            if tool_call.name == "get_weather":
+                location = tool_call.arguments.get("location", "")
+                result = await get_weather(location)
+                await tool_call.respond(result)
+            
+            elif tool_call.name == "get_current_time":
+                result = await get_current_time()
+                await tool_call.respond(result)
+            
+            else:
+                await tool_call.respond("Инструмент не найден")
+        
+        # Запускаем сессию
+        await session.start(
+            room=ctx.room,
+            agent=agent,
+        )
+
+        # 4. Приветственное сообщение
+        await session.generate_reply(instructions="Поздоровайся и спроси, чем помочь.")
         
         # Ожидаем завершения сессии
         await asyncio.Event().wait()
