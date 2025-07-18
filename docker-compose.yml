@@ -159,6 +159,8 @@ services:
     container_name: livekit-agent
     hostname: livekit-agent
     restart: unless-stopped
+    ports:
+      - "8081:8081"  # Health check порт
     volumes:
       - ./configs/agent:/app
       - ./data/agent:/data
@@ -168,13 +170,37 @@ services:
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OPENAI_TEMPERATURE=${OPENAI_TEMPERATURE:-0.7}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - DEEPGRAM_MODEL=${DEEPGRAM_MODEL:-nova-2}
+      - DEEPGRAM_LANGUAGE=${DEEPGRAM_LANGUAGE:-ru}
       - CARTESIA_API_KEY=${CARTESIA_API_KEY}
+      - CARTESIA_MODEL=${CARTESIA_MODEL:-sonic-multilingual}
+      - CARTESIA_VOICE=${CARTESIA_VOICE:-87748186-23bb-4158-a1eb-332911b0b708}
+      - CARTESIA_LANGUAGE=${CARTESIA_LANGUAGE:-ru}
+      - ARI_URL=http://freepbx-server:8088
+      - ARI_USERNAME=livekit-agent
+      - ARI_PASSWORD=livekit_ari_secret
       - PYTHONUNBUFFERED=1
       - TZ=Europe/Moscow
     depends_on:
+      - freepbx
       - redis
-    command: ["start"]
+    networks:
+      - default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.livekit-agent-health.rule=Host(`agent.stellaragents.ru`)"
+      - "traefik.http.routers.livekit-agent-health.entrypoints=websecure"
+      - "traefik.http.routers.livekit-agent-health.tls.certresolver=letsencrypt"
+      - "traefik.http.services.livekit-agent-health.loadbalancer.server.port=8081"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 
   redis:

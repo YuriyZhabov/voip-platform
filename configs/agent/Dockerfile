@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     software-properties-common \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Копируем requirements.txt
@@ -42,5 +43,5 @@ ENV PYTHONPATH=/app
 EXPOSE 8081
 
 # Команда по умолчанию
-ENTRYPOINT ["python", "agent.py"]
-CMD ["start"]
+ENTRYPOINT ["python", "main_agent.py"]
+CMD []

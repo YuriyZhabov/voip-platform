@@ -269,70 +269,53 @@ EOF'
     return 0
 }
 
-# Запуск ARI клиента
-start_ari_client() {
-    log "🚀 Запуск ARI клиента..."
+# Проверка готовности LiveKit агента
+wait_for_livekit_agent() {
+    local max_attempts=30
+    local attempt=0
     
-    # Копируем исправленный ARI клиент в контейнер
-    log "📋 Копирование исправленного ARI клиента..."
-    if [ -f "./fixed_ari_client.py" ]; then
-        docker cp ./fixed_ari_client.py livekit-agent:/app/fixed_ari_client.py
-        log "✅ Исправленный ARI клиент скопирован"
-    else
-        warn "⚠️ Файл fixed_ari_client.py не найден, используем стандартный клиент"
-    fi
+    log "🤖 Ожидание готовности LiveKit агента..."
     
-    # Останавливаем старые процессы ARI клиента (используем kill вместо pkill)
-    log "🛑 Остановка старых процессов ARI клиента..."
-    docker exec livekit-agent bash -c "ps aux | grep -E '(ari_client|persistent_ari|fixed_ari_client)' | grep -v grep | awk '{print \$2}' | xargs -r kill -9" >/dev/null 2>&1 || true
-    
-    # Ждем завершения процессов
-    sleep 3
-    
-    # Определяем какой клиент запускать
-    local ari_client="/app/fixed_ari_client.py"
-    if [ ! -f "./fixed_ari_client.py" ]; then
-        ari_client="/app/persistent_ari.py"
-    fi
-    
-    # Запускаем ARI клиент в фоновом режиме
-    log "🔄 Запуск ARI клиента: $ari_client"
-    
-    # Запускаем с nohup для фонового выполнения
-    if docker exec -d livekit-agent bash -c "nohup python $ari_client > /tmp/ari_client.log 2>&1 &"; then
-        log "⏳ Ожидание регистрации ARI приложения..."
-        sleep 8
+    while [ $attempt -lt $max_attempts ]; do
+        if curl -s http://localhost:8081/health >/dev/null 2>&1; then
+            log "✅ LiveKit агент готов"
+            return 0
+        fi
         
-        # Проверяем регистрацию ARI приложения
-        local max_attempts=15
-        local attempt=0
+        echo -n "."
+        sleep 2
+        ((attempt++))
+    done
+    
+    warn "⚠️ LiveKit агент не отвечает на health check после $((max_attempts * 2)) секунд"
+    return 1
+}
+
+# Проверка ARI интеграции
+check_ari_integration() {
+    log "🔍 Проверка ARI интеграции..."
+    
+    local max_attempts=15
+    local attempt=0
+    
+    while [ $attempt -lt $max_attempts ]; do
+        if docker exec freepbx-server asterisk -rx "ari show apps" 2>/dev/null | grep -q "livekit-agent"; then
+            log "✅ ARI приложение зарегистрировано"
+            return 0
+        fi
         
-        while [ $attempt -lt $max_attempts ]; do
-            if docker exec freepbx-server asterisk -rx "ari show apps" 2>/dev/null | grep -q "livekit-agent"; then
-                log "✅ ARI клиент запущен и зарегистрирован"
-                
-                # Дополнительная проверка процесса
-                local ari_processes=$(docker exec livekit-agent bash -c "ps aux | grep -E '(ari_client|persistent_ari|fixed_ari_client)' | grep -v grep | wc -l" 2>/dev/null || echo "0")
-                log "📊 Активных ARI процессов: $ari_processes"
-                
-                return 0
-            fi
-            
-            echo -n "."
-            sleep 2
-            ((attempt++))
-        done
-        
-        # Если не зарегистрировался, показываем логи для диагностики
-        warn "⚠️ ARI клиент не зарегистрировался после $max_attempts попыток"
-        log "📋 Логи ARI клиента:"
-        docker exec livekit-agent cat /tmp/ari_client.log 2>/dev/null | tail -10 || true
-        
-        return 1
-    else
-        error "❌ Ошибка запуска ARI клиента"
-        return 1
-    fi
+        echo -n "."
+        sleep 2
+        ((attempt++))
+    done
+    
+    warn "⚠️ ARI приложение не зарегистрировано после $((max_attempts * 2)) секунд"
+    
+    # Показываем логи для диагностики
+    log "📋 Логи LiveKit агента:"
+    docker logs livekit-agent --tail=10 2>/dev/null || true
+    
+    return 1
 }
 
 # Проверка статуса системы
@@ -458,8 +441,15 @@ main() {
     log "⏳ Ожидание стабилизации системы..."
     sleep 20
     
-    # Запуск ARI клиента
-    start_ari_client
+    # Ожидание готовности LiveKit агента
+    if ! wait_for_livekit_agent; then
+        warn "LiveKit агент не готов, но продолжаем..."
+    fi
+    
+    # Проверка ARI интеграции
+    if ! check_ari_integration; then
+        warn "ARI интеграция не готова, но продолжаем..."
+    fi
     
     # Финальная проверка
     sleep 5
