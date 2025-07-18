@@ -180,7 +180,15 @@ wait_for_asterisk() {
 
 # Восстановление диалплана
 restore_dialplan() {
-    log "📋 Восстановление диалплана..."
+    log "📋 Проверка диалплана..."
+    
+    # Проверяем, существует ли уже контекст from-novofon
+    if docker exec freepbx-server asterisk -rx "dialplan show from-novofon" 2>/dev/null | grep -q "79952227978"; then
+        log "✅ Диалплан уже настроен и работает"
+        return 0
+    fi
+    
+    log "🔧 Диалплан требует восстановления..."
     
     local dialplan_file="./configs/dialplan/extensions_dialplan.conf"
     
@@ -199,12 +207,19 @@ restore_dialplan() {
         return 1
     fi
     
-    # Добавление диалплана к существующему файлу конфигурации
-    log "🔧 Применение диалплана..."
-    docker exec freepbx-server bash -c 'cat /tmp/extensions_dialplan.conf >> /etc/asterisk/extensions_custom.conf'
-    
-    # Перезагрузка диалплана
-    docker exec freepbx-server asterisk -rx "dialplan reload" >/dev/null 2>&1
+    # Проверяем, нет ли уже дублирующих контекстов в extensions_custom.conf
+    if docker exec freepbx-server grep -q "\[from-novofon\]" /etc/asterisk/extensions_custom.conf; then
+        log "⚠️ Контекст from-novofon уже существует в extensions_custom.conf"
+        # Просто перезагружаем диалплан
+        docker exec freepbx-server asterisk -rx "dialplan reload" >/dev/null 2>&1
+    else
+        # Добавление диалплана к существующему файлу конфигурации
+        log "🔧 Добавление диалплана в конфигурацию..."
+        docker exec freepbx-server bash -c 'cat /tmp/extensions_dialplan.conf >> /etc/asterisk/extensions_custom.conf'
+        
+        # Перезагрузка диалплана
+        docker exec freepbx-server asterisk -rx "dialplan reload" >/dev/null 2>&1
+    fi
     
     # Проверка диалплана
     if docker exec freepbx-server asterisk -rx "dialplan show from-novofon" 2>/dev/null | grep -q "79952227978"; then
