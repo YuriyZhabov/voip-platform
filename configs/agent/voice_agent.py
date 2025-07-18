@@ -1,9 +1,7 @@
 import asyncio
 import logging
 import os
-import threading
 from typing import Annotated
-from aiohttp import web
 
 from livekit.agents import (
     AutoSubscribe,
@@ -12,6 +10,7 @@ from livekit.agents import (
     cli,
     llm,
 )
+from livekit.agents.voice_assistant import VoiceAssistant
 from livekit.plugins import deepgram, openai, cartesia, silero
 from livekit import rtc
 
@@ -21,50 +20,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Импорт нашего ARI клиента
-try:
-    from ari_client import EnhancedARIClient
-    ARI_AVAILABLE = True
-except ImportError:
-    logger.warning("ARI клиент недоступен")
-    ARI_AVAILABLE = False
-
-class HealthCheckServer:
-    """HTTP сервер для health check"""
-    
-    def __init__(self, port=8081):
-        self.port = port
-        self.app = web.Application()
-        self.app.router.add_get('/health', self.health_check)
-        self.app.router.add_get('/status', self.detailed_status)
-    
-    async def health_check(self, request):
-        """Простая проверка работоспособности"""
-        return web.json_response({"status": "healthy", "service": "livekit-agent"})
-    
-    async def detailed_status(self, request):
-        """Детальная информация о статусе"""
-        return web.json_response({
-            "status": "healthy",
-            "service": "livekit-agent",
-            "version": "1.0.0",
-            "uptime": "running",
-            "dependencies": {
-                "openai": "connected",
-                "deepgram": "connected",
-                "cartesia": "connected",
-                "livekit_cloud": "connected"
-            }
-        })
-    
-    async def start(self):
-        """Запуск сервера"""
-        runner = web.AppRunner(self.app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', self.port)
-        await site.start()
-        logger.info(f"Health check server started on port {self.port}")
 
 async def get_weather(location: str) -> str:
     """Получить информацию о погоде"""
@@ -98,47 +53,67 @@ async def get_current_time() -> str:
         logger.error(f"Ошибка получения времени: {e}")
         return "Не удалось получить текущее время"
 
-async def start_ari_watchdog():
-    """Запуск ARI watchdog в отдельной задаче"""
-    try:
-        from ari_watchdog import ARIWatchdog
-        watchdog = ARIWatchdog()
-        await watchdog.run()
-    except Exception as e:
-        logger.error(f"Ошибка запуска ARI watchdog: {e}")
-
 async def entrypoint(ctx: JobContext):
-    """Точка входа для агента"""
+    """Точка входа для голосового агента"""
     try:
-        # Запускаем health check сервер
-        health_server = HealthCheckServer()
-        await health_server.start()
-        
-        # Запускаем ARI watchdog в фоновой задаче
-        ari_task = asyncio.create_task(start_ari_watchdog())
-        logger.info("ARI watchdog запущен в фоновом режиме")
-        
         # Подключаемся к комнате
         await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
         logger.info(f"Подключились к комнате: {ctx.room.name}")
 
-        # Настраиваем обработчики событий
+        # Настраиваем LLM
+        initial_ctx = llm.ChatContext().append(
+            role="system",
+            text=(
+                "Вы - дружелюбный голосовой помощник. "
+                "Отвечайте кратко и по делу на русском языке. "
+                "Вы можете помочь с информацией о погоде и времени. "
+                "Будьте вежливы и полезны."
+            ),
+        )
+
+        # Создаем голосового ассистента
+        assistant = VoiceAssistant(
+            vad=silero.VAD.load(),  # Детектор голосовой активности
+            stt=deepgram.STT(),     # Распознавание речи
+            llm=openai.LLM(),       # Языковая модель
+            tts=cartesia.TTS(),     # Синтез речи
+            chat_ctx=initial_ctx,
+        )
+
+        # Добавляем функции
+        assistant.fnc_ctx.ai_functions.extend([
+            llm.FunctionContext(
+                get_weather,
+                description="Получить информацию о погоде в указанном городе",
+            ),
+            llm.FunctionContext(
+                get_current_time,
+                description="Получить текущее время",
+            ),
+        ])
+
+        # Запускаем ассистента
+        assistant.start(ctx.room)
+        logger.info("Голосовой ассистент запущен")
+
+        # Приветствие при подключении участника
         @ctx.room.on("participant_connected")
         def on_participant_connected(participant: rtc.RemoteParticipant):
             logger.info(f"Участник подключился: {participant.identity}")
+            # Отправляем приветствие
+            asyncio.create_task(
+                assistant.say("Привет! Я ваш голосовой помощник. Чем могу помочь?")
+            )
 
         @ctx.room.on("participant_disconnected") 
         def on_participant_disconnected(participant: rtc.RemoteParticipant):
             logger.info(f"Участник отключился: {participant.identity}")
 
-        # Простое логирование для проверки работы
-        logger.info("LiveKit Agent успешно запущен и готов к работе")
-        
         # Ожидаем завершения сессии
         await asyncio.Event().wait()
         
     except Exception as e:
-        logger.error(f"Ошибка в работе агента: {e}")
+        logger.error(f"Ошибка в работе голосового агента: {e}")
         raise
 
 if __name__ == "__main__":

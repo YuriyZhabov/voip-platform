@@ -178,6 +178,44 @@ wait_for_asterisk() {
     return 1
 }
 
+# Восстановление диалплана
+restore_dialplan() {
+    log "📋 Восстановление диалплана..."
+    
+    local dialplan_file="./configs/dialplan/extensions_dialplan.conf"
+    
+    # Проверка существования файла диалплана
+    if [ ! -f "$dialplan_file" ]; then
+        error "❌ Файл диалплана не найден: $dialplan_file"
+        return 1
+    fi
+    
+    # Копирование файла диалплана в контейнер
+    log "📋 Копирование диалплана из файла: $dialplan_file"
+    if docker cp "$dialplan_file" freepbx-server:/tmp/extensions_dialplan.conf; then
+        log "✅ Файл диалплана скопирован в контейнер"
+    else
+        error "❌ Ошибка копирования файла диалплана"
+        return 1
+    fi
+    
+    # Добавление диалплана к существующему файлу конфигурации
+    log "🔧 Применение диалплана..."
+    docker exec freepbx-server bash -c 'cat /tmp/extensions_dialplan.conf >> /etc/asterisk/extensions_custom.conf'
+    
+    # Перезагрузка диалплана
+    docker exec freepbx-server asterisk -rx "dialplan reload" >/dev/null 2>&1
+    
+    # Проверка диалплана
+    if docker exec freepbx-server asterisk -rx "dialplan show from-novofon" 2>/dev/null | grep -q "79952227978"; then
+        log "✅ Диалплан восстановлен из файла: $dialplan_file"
+        return 0
+    else
+        error "❌ Ошибка восстановления диалплана"
+        return 1
+    fi
+}
+
 # Применение конфигураций Asterisk
 apply_asterisk_configs() {
     log "📋 Применение конфигураций Asterisk..."
@@ -202,11 +240,18 @@ EOF'
     # Запуск скрипта инициализации внутри контейнера
     if docker exec freepbx-server /usr/local/bin/init-asterisk-config.sh; then
         log "✅ Конфигурации Asterisk применены"
-        return 0
     else
         error "❌ Ошибка применения конфигураций Asterisk"
         return 1
     fi
+    
+    # Восстановление диалплана
+    if ! restore_dialplan; then
+        error "❌ Ошибка восстановления диалплана"
+        return 1
+    fi
+    
+    return 0
 }
 
 # Запуск ARI клиента
@@ -222,13 +267,12 @@ start_ari_client() {
         warn "⚠️ Файл fixed_ari_client.py не найден, используем стандартный клиент"
     fi
     
-    # Останавливаем старые процессы ARI клиента
-    docker exec livekit-agent pkill -f "ari_client.py" >/dev/null 2>&1 || true
-    docker exec livekit-agent pkill -f "persistent_ari.py" >/dev/null 2>&1 || true
-    docker exec livekit-agent pkill -f "fixed_ari_client.py" >/dev/null 2>&1 || true
+    # Останавливаем старые процессы ARI клиента (используем kill вместо pkill)
+    log "🛑 Остановка старых процессов ARI клиента..."
+    docker exec livekit-agent bash -c "ps aux | grep -E '(ari_client|persistent_ari|fixed_ari_client)' | grep -v grep | awk '{print \$2}' | xargs -r kill -9" >/dev/null 2>&1 || true
     
     # Ждем завершения процессов
-    sleep 2
+    sleep 3
     
     # Определяем какой клиент запускать
     local ari_client="/app/fixed_ari_client.py"
@@ -238,16 +282,24 @@ start_ari_client() {
     
     # Запускаем ARI клиент в фоновом режиме
     log "🔄 Запуск ARI клиента: $ari_client"
-    if docker exec -d livekit-agent python $ari_client; then
-        sleep 5
+    
+    # Запускаем с nohup для фонового выполнения
+    if docker exec -d livekit-agent bash -c "nohup python $ari_client > /tmp/ari_client.log 2>&1 &"; then
+        log "⏳ Ожидание регистрации ARI приложения..."
+        sleep 8
         
         # Проверяем регистрацию ARI приложения
-        local max_attempts=10
+        local max_attempts=15
         local attempt=0
         
         while [ $attempt -lt $max_attempts ]; do
-            if docker exec freepbx-server asterisk -rx "ari show apps" | grep -q "livekit-agent"; then
+            if docker exec freepbx-server asterisk -rx "ari show apps" 2>/dev/null | grep -q "livekit-agent"; then
                 log "✅ ARI клиент запущен и зарегистрирован"
+                
+                # Дополнительная проверка процесса
+                local ari_processes=$(docker exec livekit-agent bash -c "ps aux | grep -E '(ari_client|persistent_ari|fixed_ari_client)' | grep -v grep | wc -l" 2>/dev/null || echo "0")
+                log "📊 Активных ARI процессов: $ari_processes"
+                
                 return 0
             fi
             
@@ -256,7 +308,11 @@ start_ari_client() {
             ((attempt++))
         done
         
-        warn "⚠️ ARI клиент запущен, но приложение не зарегистрировано после $max_attempts попыток"
+        # Если не зарегистрировался, показываем логи для диагностики
+        warn "⚠️ ARI клиент не зарегистрировался после $max_attempts попыток"
+        log "📋 Логи ARI клиента:"
+        docker exec livekit-agent cat /tmp/ari_client.log 2>/dev/null | tail -10 || true
+        
         return 1
     else
         error "❌ Ошибка запуска ARI клиента"

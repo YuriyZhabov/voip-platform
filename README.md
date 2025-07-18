@@ -35,15 +35,28 @@ cp .env.example .env
 # Отредактируйте .env файл с вашими настройками
 ```
 
-### 3. Запуск платформы
+### 3. Автоматический запуск системы
 ```bash
-docker-compose up -d
+# Обычный запуск
+./scripts/start-system.sh
+
+# Запуск с очисткой данных (полная пересборка)
+./scripts/start-system.sh --clean
 ```
 
-### 4. Ожидание инициализации
-FreePBX требует до 30 минут для первоначальной установки. Следите за логами:
+### 4. Проверка системы
 ```bash
-docker-compose logs -f freepbx
+# Запуск тестирования всех компонентов
+./scripts/test_system.sh
+
+# Детальная информация о системе
+./scripts/test_system.sh --detailed
+```
+
+### 5. Мониторинг входящих звонков
+```bash
+# Мониторинг в реальном времени
+./scripts/monitor_incoming_calls.sh
 ```
 
 ## 🔧 Компоненты
@@ -120,26 +133,80 @@ CARTESIA_API_KEY=your_cartesia_key
 
 ## 🛠️ Управление
 
-### Просмотр статуса
+### Автоматические скрипты управления
+
+**Запуск системы:**
+```bash
+# Обычный запуск (восстанавливает конфигурации после пересборки)
+./scripts/start-system.sh
+
+# Полная пересборка с очисткой данных
+./scripts/start-system.sh --clean
+
+# Справка по опциям
+./scripts/start-system.sh --help
+```
+
+**Тестирование системы:**
+```bash
+# Быстрое тестирование всех компонентов (6 тестов)
+./scripts/test_system.sh
+
+# Детальная информация о системе
+./scripts/test_system.sh --detailed
+```
+
+**Мониторинг:**
+```bash
+# Мониторинг входящих звонков в реальном времени
+./scripts/monitor_incoming_calls.sh
+```
+
+### Что делает скрипт start-system.sh
+
+Скрипт автоматически решает проблему потери конфигураций при пересборке FreePBX:
+
+1. **Подготавливает инфраструктуру** - создает сети, запускает контейнеры
+2. **Ожидает готовности FreePBX** - до 30 минут на полную инициализацию
+3. **Восстанавливает ARI конфигурацию** - настройки для связи с LiveKit
+4. **Восстанавливает диалплан** - из файла `configs/dialplan/extensions_dialplan.conf`
+5. **Запускает ARI клиент** - исправленную версию для стабильной работы
+6. **Проверяет все компоненты** - SIP регистрация, endpoints, LiveKit агент
+7. **Выводит статус системы** - готовность к приему звонков
+
+### Что проверяет test_system.sh
+
+Скрипт тестирования проверяет 6 ключевых компонентов:
+
+1. ✅ **Asterisk** - основной движок VoIP системы
+2. ✅ **SIP регистрация** - подключение к провайдеру Novofon
+3. ✅ **ARI приложение** - интерфейс для LiveKit агента
+4. ✅ **LiveKit агент** - AI голосовой помощник
+5. ✅ **Диалплан** - маршрутизация входящих звонков
+6. ✅ **Внутренние звонки** - тестовые номера (9999, 8888)
+
+### Ручное управление Docker
+
+**Просмотр статуса:**
 ```bash
 docker-compose ps
 ```
 
-### Просмотр логов
+**Просмотр логов:**
 ```bash
 docker-compose logs freepbx
 docker-compose logs traefik
 docker-compose logs livekit-agent
 ```
 
-### Перезапуск сервисов
+**Перезапуск сервисов:**
 ```bash
 docker-compose restart freepbx
 docker-compose restart traefik
 docker-compose restart livekit-agent
 ```
 
-### Остановка платформы
+**Остановка платформы:**
 ```bash
 docker-compose down
 ```
@@ -273,42 +340,66 @@ docker exec freepbx-database mysqldump -u root -proot_password asterisk > freepb
 voip-platform/
 ├── docker-compose.yml          # Основная конфигурация Docker
 ├── .env.example               # Пример переменных окружения
+├── fixed_ari_client.py        # Исправленный ARI клиент для LiveKit
+├── init-asterisk-config.sh    # Скрипт инициализации Asterisk
 ├── configs/
 │   ├── asterisk/             # Конфигурация Asterisk 22
-│   │   ├── pjsip.conf       # Настройки PJSIP
-│   │   ├── extensions.conf   # Диалплан
-│   │   ├── modules.conf     # Модули Asterisk
+│   │   ├── pjsip_custom.conf # Настройки PJSIP (SIP провайдер)
+│   │   ├── extensions_custom.conf # Базовый диалплан
 │   │   ├── ari.conf         # Asterisk REST Interface
-│   │   ├── stasis.conf      # Stasis приложения
-│   │   ├── http.conf        # HTTP сервер
-│   │   ├── manager.conf     # AMI интерфейс
-│   │   ├── logger.conf      # Логирование
-│   │   ├── security.conf    # Безопасность
-│   │   ├── cdr.conf         # Call Detail Records
-│   │   ├── cel.conf         # Channel Event Logging
-│   │   └── features.conf    # Функции звонков
-│   ├── agent/               # AI Agent
-│   │   ├── agent.py         # Основной код агента
-│   │   ├── tools.py         # Дополнительные инструменты
-│   │   ├── config.py        # Конфигурация агента
-│   │   ├── requirements.txt # Python зависимости
-│   │   └── Dockerfile       # Docker образ агента
-│   └── redis/
-│       └── redis.conf       # Конфигурация Redis
-├── docker/
-│   ├── traefik/
-│   │   ├── traefik.yml      # Статическая конфигурация Traefik
-│   │   └── dynamic.yml      # Динамическая конфигурация
-│   └── freepbx/
-│       ├── Dockerfile       # Docker образ FreePBX
-│       └── entrypoint.sh    # Скрипт запуска с XML документацией
-├── scripts/
-│   ├── init-asterisk.sh     # Инициализация Asterisk
-│   ├── init-agent.sh        # Инициализация агента
-│   ├── backup.sh            # Резервное копирование
-│   └── security-monitor.sh  # Мониторинг безопасности
-└── ssl/                     # SSL сертификаты
+│   │   └── http.conf        # HTTP сервер
+│   ├── dialplan/            # Диалплан системы
+│   │   ├── extensions_dialplan.conf # Основной диалплан
+│   │   └── README.md        # Документация диалплана
+│   └── agent/               # AI Agent
+│       ├── agent.py         # Основной код агента
+│       ├── voice_agent.py   # Голосовой агент
+│       ├── ari_watchdog.py  # Мониторинг ARI соединения
+│       ├── validate_url.py  # Валидация URL
+│       ├── requirements.txt # Python зависимости
+│       └── Dockerfile       # Docker образ агента
+├── scripts/                 # Скрипты управления
+│   ├── start-system.sh      # Автоматический запуск системы
+│   ├── test_system.sh       # Тестирование всех компонентов
+│   └── monitor_incoming_calls.sh # Мониторинг звонков
+└── docker/
+    ├── traefik/
+    │   ├── traefik.yml      # Статическая конфигурация Traefik
+    │   └── dynamic.yml      # Динамическая конфигурация
+    └── freepbx/
+        ├── Dockerfile       # Docker образ FreePBX
+        └── entrypoint.sh    # Скрипт запуска
 ```
+
+## 🔄 Автоматическое восстановление конфигураций
+
+### Проблема пересборки
+При пересборке FreePBX теряет пользовательские конфигурации (диалплан, ARI настройки). Система решает эту проблему автоматически.
+
+### Решение
+Скрипт `start-system.sh` автоматически:
+
+1. **Восстанавливает диалплан** из файла `configs/dialplan/extensions_dialplan.conf`
+2. **Настраивает ARI интерфейс** с правильными учетными данными
+3. **Запускает ARI клиент** для связи с LiveKit
+4. **Проверяет все компоненты** системы
+
+### Редактирование диалплана
+Диалплан теперь хранится в отдельном файле для удобства редактирования:
+
+```bash
+# Отредактируйте диалплан
+nano configs/dialplan/extensions_dialplan.conf
+
+# Перезапустите систему для применения изменений
+./scripts/start-system.sh
+```
+
+**Преимущества вынесения диалплана в отдельный файл:**
+- ✅ Легко редактировать без изменения скрипта запуска
+- ✅ Версионирование изменений в Git
+- ✅ Автоматическое восстановление после пересборки FreePBX
+- ✅ Возможность создания разных версий диалплана для разных сред
 
 ## 🔧 Интеграция с Novofon SIP
 
