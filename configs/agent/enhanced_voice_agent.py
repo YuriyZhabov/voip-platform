@@ -18,8 +18,8 @@ from livekit.agents import (
     WorkerOptions,
     cli,
     llm,
+    VoiceAssistant,
 )
-from livekit.agents.voice_assistant import VoiceAssistant
 from livekit.plugins import deepgram, openai, cartesia, silero
 from livekit import rtc, api
 

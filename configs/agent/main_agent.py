@@ -1,448 +1,266 @@
 #!/usr/bin/env python3
 """
-Главный агент с интеграцией аудио моста
-Объединяет LiveKit агента и Asterisk ARI
+Главный голосовой ИИ агент для VoIP системы
+Интегрируется с Asterisk через ARI и обеспечивает полноценное голосовое взаимодействие
 """
 
 import asyncio
 import logging
 import os
-import sys
-import json
-from pathlib import Path
-from typing import Dict, Optional
+from typing import Annotated
+from datetime import datetime
+import pytz
 
-# Добавляем текущую директорию в путь для импортов
-sys.path.append(str(Path(__file__).parent))
+from livekit.agents import (
+    AutoSubscribe,
+    JobContext,
+    WorkerOptions,
+    cli,
+    llm,
+)
 
-import aiohttp
-from aiohttp import web
-from livekit import api, rtc
-from livekit.agents import JobContext, WorkerOptions, cli
-from livekit.agents.voice_assistant import VoiceAssistant
+# Пробуем разные варианты импорта VoiceAssistant
+try:
+    from livekit.agents.voice_assistant import VoiceAssistant
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Импорт VoiceAssistant из livekit.agents.voice_assistant")
+except ImportError:
+    try:
+        from livekit.agents import VoiceAssistant
+        logger = logging.getLogger(__name__)
+        logger.info("✅ Импорт VoiceAssistant из livekit.agents")
+    except ImportError:
+        try:
+            from livekit.agents.voice import VoiceAssistant
+            logger = logging.getLogger(__name__)
+            logger.info("✅ Импорт VoiceAssistant из livekit.agents.voice")
+        except ImportError as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"❌ Не удалось импортировать VoiceAssistant: {e}")
+            raise ImportError("VoiceAssistant не найден ни в одном из модулей")
+
 from livekit.plugins import deepgram, openai, cartesia, silero
+from livekit import rtc
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('/logs/main_agent.log')
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-class MainAgent:
-    """Главный агент системы"""
+async def get_weather(location: Annotated[str, "Название города"]) -> str:
+    """Получить информацию о погоде"""
+    logger.info(f"Запрос погоды для города: {location}")
     
-    def __init__(self):
-        # Настройки ARI
-        self.ari_url = os.getenv('ARI_URL', 'http://freepbx-server:8088')
-        self.ari_username = os.getenv('ARI_USERNAME', 'livekit-agent')
-        self.ari_password = os.getenv('ARI_PASSWORD', 'livekit_ari_secret')
-        
-        # LiveKit настройки
-        self.livekit_url = os.getenv('LIVEKIT_URL')
-        self.livekit_api_key = os.getenv('LIVEKIT_API_KEY')
-        self.livekit_api_secret = os.getenv('LIVEKIT_API_SECRET')
-        
-        # Состояние
-        self.health_server = None
-        self.running = False
-        self.ari_ws = None
-        self.session = None
-        self.active_channels: Dict[str, Dict] = {}
-        
-    async def start(self):
-        """Запуск главного агента"""
-        logger.info("🚀 Запуск главного агента VoIP системы")
-        
-        try:
-            self.running = True
-            
-            # Проверяем переменные окружения
-            await self.check_environment()
-            
-            # Запускаем HTTP сервер для health check
-            await self.start_health_server()
-            
-            # Создаем HTTP сессию
-            self.session = aiohttp.ClientSession()
-            
-            # Запускаем ARI клиент
-            ari_task = asyncio.create_task(self.start_ari_client())
-            
-            # Запускаем мониторинг системы
-            monitor_task = asyncio.create_task(self.system_monitor())
-            
-            logger.info("✅ Главный агент успешно запущен")
-            
-            # Ожидаем завершения любой из задач
-            done, pending = await asyncio.wait(
-                [ari_task, monitor_task],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            # Отменяем оставшиеся задачи
-            for task in pending:
-                task.cancel()
-                
-        except Exception as e:
-            logger.error(f"💥 Критическая ошибка главного агента: {e}")
-            raise
-        finally:
-            await self.cleanup()
+    # Данные о погоде (в реальной системе здесь был бы API вызов)
+    weather_data = {
+        "москва": "В Москве сейчас +2°C, облачно с прояснениями, ветер 3 м/с",
+        "санкт-петербург": "В Санкт-Петербурге +1°C, небольшой дождь, ветер 5 м/с", 
+        "спб": "В Санкт-Петербурге +1°C, небольшой дождь, ветер 5 м/с",
+        "екатеринбург": "В Екатеринбурге -5°C, ясно, ветер 2 м/с",
+        "новосибирск": "В Новосибирске -8°C, снег, ветер 4 м/с",
+        "казань": "В Казани -2°C, облачно, ветер 3 м/с",
+        "нижний новгород": "В Нижнем Новгороде 0°C, туман, ветер 1 м/с",
+        "сочи": "В Сочи +12°C, солнечно, ветер 2 м/с",
+        "краснодар": "В Краснодаре +8°C, переменная облачность, ветер 3 м/с",
+    }
     
-    async def check_environment(self):
-        """Проверка переменных окружения"""
-        required_vars = [
-            'LIVEKIT_URL',
-            'LIVEKIT_API_KEY', 
-            'LIVEKIT_API_SECRET',
-            'OPENAI_API_KEY',
-            'DEEPGRAM_API_KEY',
-            'CARTESIA_API_KEY'
+    city_lower = location.lower().strip()
+    
+    # Поиск города в данных
+    for city_key, weather_info in weather_data.items():
+        if city_key in city_lower or city_lower in city_key:
+            return weather_info
+    
+    return f"К сожалению, у меня нет актуальной информации о погоде в городе {location}. Попробуйте спросить о Москве, Санкт-Петербурге или других крупных городах России."
+
+async def get_current_time() -> str:
+    """Получить текущее время"""
+    try:
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        current_time = datetime.now(moscow_tz)
+        
+        # Форматируем время по-русски
+        months = [
+            "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря"
         ]
         
-        missing_vars = []
-        for var in required_vars:
-            if not os.getenv(var):
-                missing_vars.append(var)
+        weekdays = [
+            "понедельник", "вторник", "среда", "четверг", 
+            "пятница", "суббота", "воскресенье"
+        ]
         
-        if missing_vars:
-            logger.error(f"❌ Отсутствуют переменные окружения: {', '.join(missing_vars)}")
-            raise ValueError(f"Отсутствуют обязательные переменные окружения: {missing_vars}")
+        month_name = months[current_time.month - 1]
+        weekday_name = weekdays[current_time.weekday()]
         
-        logger.info("✅ Все переменные окружения настроены")
+        time_str = (
+            f"Сейчас {current_time.strftime('%H:%M')}, "
+            f"{weekday_name}, {current_time.day} {month_name} "
+            f"{current_time.year} года"
+        )
         
-        # Логируем конфигурацию (без секретов)
-        logger.info(f"🔗 LiveKit URL: {os.getenv('LIVEKIT_URL')}")
-        logger.info(f"🤖 OpenAI модель: {os.getenv('OPENAI_MODEL', 'gpt-4o-mini')}")
-        logger.info(f"🎤 Deepgram модель: {os.getenv('DEEPGRAM_MODEL', 'nova-2')}")
-        logger.info(f"🔊 Cartesia модель: {os.getenv('CARTESIA_MODEL', 'sonic-multilingual')}")
-    
-    async def start_health_server(self):
-        """Запуск HTTP сервера для health check"""
-        try:
-            app = web.Application()
-            app.router.add_get('/health', self.health_check_handler)
-            app.router.add_get('/status', self.status_handler)
-            app.router.add_get('/stats', self.stats_handler)
-            
-            runner = web.AppRunner(app)
-            await runner.setup()
-            
-            site = web.TCPSite(runner, '0.0.0.0', 8081)
-            await site.start()
-            
-            logger.info("🌐 Health check сервер запущен на порту 8081")
-            
-        except Exception as e:
-            logger.error(f"Ошибка запуска health check сервера: {e}")
-    
-    async def health_check_handler(self, request):
-        """Обработчик health check"""
-        try:
-            # Проверяем состояние аудио моста
-            bridge_healthy = await self.audio_bridge.health_check()
-            
-            status = "healthy" if bridge_healthy else "unhealthy"
-            
-            return web.json_response({
-                "status": status,
-                "service": "voip-ai-agent",
-                "version": "1.0.0",
-                "components": {
-                    "audio_bridge": "healthy" if bridge_healthy else "unhealthy",
-                    "livekit": "connected",
-                    "asterisk": "connected" if bridge_healthy else "disconnected"
-                }
-            })
-            
-        except Exception as e:
-            logger.error(f"Ошибка health check: {e}")
-            return web.json_response({
-                "status": "error",
-                "error": str(e)
-            }, status=500)
-    
-    async def status_handler(self, request):
-        """Обработчик детального статуса"""
-        try:
-            stats = self.audio_bridge.get_system_stats()
-            
-            return web.json_response({
-                "status": "running" if self.running else "stopped",
-                "service": "voip-ai-agent",
-                "uptime_seconds": stats.get('uptime', 0),
-                "active_calls": stats.get('active_channels', 0),
-                "active_rooms": stats.get('active_rooms', 0),
-                "environment": {
-                    "livekit_url": os.getenv('LIVEKIT_URL', 'not_set'),
-                    "openai_model": os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
-                    "deepgram_model": os.getenv('DEEPGRAM_MODEL', 'nova-2'),
-                    "cartesia_model": os.getenv('CARTESIA_MODEL', 'sonic-multilingual')
-                }
-            })
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения статуса: {e}")
-            return web.json_response({
-                "status": "error",
-                "error": str(e)
-            }, status=500)
-    
-    async def stats_handler(self, request):
-        """Обработчик статистики"""
-        try:
-            stats = self.audio_bridge.get_system_stats()
-            return web.json_response(stats)
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения статистики: {e}")
-            return web.json_response({
-                "error": str(e)
-            }, status=500)
-    
-    async def system_monitor(self):
-        """Мониторинг системы"""
-        try:
-            while self.running:
-                await asyncio.sleep(300)  # Каждые 5 минут
-                
-                stats = self.audio_bridge.get_system_stats()
-                active_calls = stats.get('active_channels', 0)
-                active_rooms = stats.get('active_rooms', 0)
-                
-                logger.info(f"📊 Системная статистика:")
-                logger.info(f"   • Активных звонков: {active_calls}")
-                logger.info(f"   • Активных комнат: {active_rooms}")
-                logger.info(f"   • Время работы: {stats.get('uptime', 0):.0f} сек")
-                
-                # Проверяем использование памяти
-                try:
-                    import psutil
-                    process = psutil.Process()
-                    memory_mb = process.memory_info().rss / 1024 / 1024
-                    cpu_percent = process.cpu_percent()
-                    
-                    logger.info(f"   • Память: {memory_mb:.1f} MB")
-                    logger.info(f"   • CPU: {cpu_percent:.1f}%")
-                    
-                except ImportError:
-                    pass  # psutil не установлен
-                
-        except Exception as e:
-            logger.error(f"Ошибка мониторинга системы: {e}")
-    
-    async def start_ari_client(self):
-        """Запуск ARI клиента"""
-        try:
-            logger.info("🔌 Подключение к ARI...")
-            
-            # Ожидаем готовности Asterisk
-            await self.wait_for_asterisk()
-            
-            # Подключаемся к ARI WebSocket
-            await self.connect_to_ari()
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка ARI клиента: {e}")
-            raise
-    
-    async def wait_for_asterisk(self):
-        """Ожидание готовности Asterisk"""
-        max_attempts = 30
-        for attempt in range(max_attempts):
-            try:
-                url = f"{self.ari_url}/ari/asterisk/info"
-                async with self.session.get(
-                    url,
-                    auth=aiohttp.BasicAuth(self.ari_username, self.ari_password)
-                ) as response:
-                    if response.status == 200:
-                        logger.info("✅ Asterisk готов")
-                        return
-            except Exception:
-                pass
-            
-            await asyncio.sleep(2)
+        return time_str
         
-        raise Exception("Asterisk не готов")
-    
-    async def connect_to_ari(self):
-        """Подключение к ARI WebSocket"""
-        ws_url = f"{self.ari_url}/ari/events"
-        params = {
-            'api_key': self.ari_username,
-            'api_secret': self.ari_password,
-            'app': 'livekit-agent'
-        }
-        
-        logger.info(f"🔌 Подключение к ARI WebSocket: {ws_url}")
-        
-        try:
-            self.ari_ws = await self.session.ws_connect(
-                ws_url,
-                params=params,
-                auth=aiohttp.BasicAuth(self.ari_username, self.ari_password)
-            )
-            
-            logger.info("✅ ARI WebSocket подключен")
-            await self.handle_ari_events()
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к ARI: {e}")
-            raise
-    
-    async def handle_ari_events(self):
-        """Обработка событий от ARI"""
-        logger.info("👂 Начало прослушивания ARI событий...")
-        
-        try:
-            async for msg in self.ari_ws:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    try:
-                        event = json.loads(msg.data)
-                        await self.process_ari_event(event)
-                    except Exception as e:
-                        logger.error(f"Ошибка обработки события: {e}")
-                        
-        except Exception as e:
-            logger.error(f"Ошибка в обработке ARI событий: {e}")
-    
-    async def process_ari_event(self, event: Dict):
-        """Обработка ARI события"""
-        event_type = event.get('type')
-        
-        if event_type == 'StasisStart':
-            await self.handle_call_start(event)
-        elif event_type == 'StasisEnd':
-            await self.handle_call_end(event)
-    
-    async def handle_call_start(self, event: Dict):
-        """Обработка начала звонка"""
-        channel = event.get('channel', {})
-        channel_id = channel.get('id')
-        caller_id = channel.get('caller', {}).get('number', 'Unknown')
-        
-        logger.info(f"📞 Новый звонок: {caller_id} -> канал {channel_id}")
-        
-        # Сохраняем информацию о канале
-        self.active_channels[channel_id] = {
-            'id': channel_id,
-            'caller_id': caller_id,
-            'state': channel.get('state'),
-            'start_time': asyncio.get_event_loop().time()
-        }
-        
-        # Отвечаем на звонок
-        await self.answer_channel(channel_id)
-        
-        # Воспроизводим приветствие
-        await self.play_greeting(channel_id)
-        
-        # Имитируем работу ИИ агента
-        await self.simulate_ai_conversation(channel_id)
-    
-    async def handle_call_end(self, event: Dict):
-        """Обработка завершения звонка"""
-        channel = event.get('channel', {})
-        channel_id = channel.get('id')
-        
-        logger.info(f"📞 Завершение звонка для канала {channel_id}")
-        
-        if channel_id in self.active_channels:
-            del self.active_channels[channel_id]
-    
-    async def answer_channel(self, channel_id: str):
-        """Ответ на звонок"""
-        try:
-            url = f"{self.ari_url}/ari/channels/{channel_id}/answer"
-            async with self.session.post(
-                url,
-                auth=aiohttp.BasicAuth(self.ari_username, self.ari_password)
-            ) as response:
-                if response.status == 204:
-                    logger.info(f"✅ Канал {channel_id} отвечен")
-                else:
-                    logger.error(f"❌ Ошибка ответа: {response.status}")
-        except Exception as e:
-            logger.error(f"Ошибка ответа на канал: {e}")
-    
-    async def play_greeting(self, channel_id: str):
-        """Воспроизведение приветствия"""
-        try:
-            url = f"{self.ari_url}/ari/channels/{channel_id}/play"
-            data = {"media": "sound:hello-world"}
-            
-            async with self.session.post(
-                url,
-                auth=aiohttp.BasicAuth(self.ari_username, self.ari_password),
-                json=data
-            ) as response:
-                if response.status == 201:
-                    logger.info(f"🎵 Приветствие воспроизводится для {channel_id}")
-                else:
-                    logger.error(f"❌ Ошибка воспроизведения: {response.status}")
-        except Exception as e:
-            logger.error(f"Ошибка воспроизведения: {e}")
-    
-    async def simulate_ai_conversation(self, channel_id: str):
-        """Имитация ИИ разговора"""
-        try:
-            logger.info(f"🤖 Имитация ИИ разговора для {channel_id}")
-            
-            # Ждем 10 секунд для демонстрации
-            await asyncio.sleep(10)
-            
-            # Завершаем звонок
-            await self.hangup_channel(channel_id)
-            
-        except Exception as e:
-            logger.error(f"Ошибка имитации разговора: {e}")
-    
-    async def hangup_channel(self, channel_id: str):
-        """Завершение звонка"""
-        try:
-            url = f"{self.ari_url}/ari/channels/{channel_id}"
-            async with self.session.delete(
-                url,
-                auth=aiohttp.BasicAuth(self.ari_username, self.ari_password)
-            ) as response:
-                if response.status == 204:
-                    logger.info(f"📞 Канал {channel_id} завершен")
-        except Exception as e:
-            logger.error(f"Ошибка завершения канала: {e}")
-    
-    async def cleanup(self):
-        """Очистка ресурсов"""
-        logger.info("🧹 Завершение работы главного агента...")
-        
-        self.running = False
-        
-        # Закрываем WebSocket
-        if self.ari_ws:
-            await self.ari_ws.close()
-        
-        # Закрываем HTTP сессию
-        if self.session:
-            await self.session.close()
-        
-        logger.info("✅ Главный агент остановлен")
-
-async def main():
-    """Основная функция"""
-    agent = MainAgent()
-    
-    try:
-        await agent.start()
-    except KeyboardInterrupt:
-        logger.info("🛑 Получен сигнал прерывания")
     except Exception as e:
-        logger.error(f"💥 Критическая ошибка: {e}")
-        sys.exit(1)
+        logger.error(f"Ошибка получения времени: {e}")
+        return "Извините, не могу получить текущее время"
+
+async def get_company_info() -> str:
+    """Получить информацию о компании"""
+    return (
+        "Stellar Agents - это инновационная компания, специализирующаяся на "
+        "разработке ИИ решений для бизнеса. Мы создаем умных голосовых "
+        "ассистентов и автоматизируем процессы обслуживания клиентов."
+    )
+
+async def end_call(reason: Annotated[str, "Причина завершения звонка"] = "По просьбе пользователя") -> str:
+    """Завершить звонок"""
+    logger.info(f"Запрос на завершение звонка: {reason}")
+    return "Хорошо, завершаю звонок. До свидания и хорошего дня!"
+
+def create_personalized_context(caller_id: str) -> llm.ChatContext:
+    """Создание персонализированного контекста для звонящего"""
+    
+    # Определяем время суток для приветствия
+    moscow_tz = pytz.timezone('Europe/Moscow')
+    current_time = datetime.now(moscow_tz)
+    hour = current_time.hour
+    
+    if 6 <= hour < 12:
+        greeting_time = "Доброе утро"
+    elif 12 <= hour < 18:
+        greeting_time = "Добрый день"
+    elif 18 <= hour < 23:
+        greeting_time = "Добрый вечер"
+    else:
+        greeting_time = "Доброй ночи"
+    
+    # Создаем контекст
+    context = llm.ChatContext().append(
+        role="system",
+        text=(
+            f"Вы - дружелюбный русскоговорящий ИИ ассистент компании Stellar Agents. "
+            f"Сейчас {current_time.strftime('%H:%M, %d %B %Y года')}. "
+            f"Вы разговариваете с абонентом {caller_id}. "
+            f"Начните разговор с '{greeting_time}!'. "
+            f"\nВаши возможности:\n"
+            f"- Отвечать на общие вопросы\n"
+            f"- Предоставлять информацию о погоде\n"
+            f"- Сообщать текущее время\n"
+            f"- Помогать с простыми задачами\n"
+            f"- Поддерживать дружескую беседу\n"
+            f"\nПравила общения:\n"
+            f"- Говорите только на русском языке\n"
+            f"- Отвечайте кратко и по делу (максимум 2-3 предложения)\n"
+            f"- Будьте вежливы и дружелюбны\n"
+            f"- Если не знаете ответ, честно скажите об этом\n"
+            f"- Не используйте технические термины\n"
+            f"- Говорите естественно, как живой человек\n"
+        )
+    )
+    
+    return context
+
+async def entrypoint(ctx: JobContext):
+    """Точка входа для голосового агента"""
+    try:
+        logger.info(f"🚀 Запуск голосового агента для комнаты: {ctx.room.name}")
+        
+        # Подключаемся к комнате
+        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+        
+        # Извлекаем информацию о звонящем из имени комнаты
+        room_name = ctx.room.name
+        caller_id = "Unknown"
+        
+        # Пытаемся извлечь caller_id из имени комнаты (формат: call-{channel_id}-{caller_id})
+        if room_name.startswith("call-"):
+            parts = room_name.split("-")
+            if len(parts) >= 3:
+                caller_id = parts[2]
+        
+        # Создаем персонализированный контекст
+        chat_context = create_personalized_context(caller_id)
+        
+        # Создаем голосового ассистента
+        assistant = VoiceAssistant(
+            vad=silero.VAD.load(
+                # Настройки для телефонного качества звука
+                min_silence_duration=0.5,  # Минимальная пауза для определения конца речи
+                min_speaking_duration=0.3,  # Минимальная длительность речи
+            ),
+            stt=deepgram.STT(
+                # Оптимизация для русского языка и телефонного качества
+                model="nova-2-phonecall",  # Модель для телефонных звонков
+                language="ru",
+                smart_format=True,
+                punctuate=True,
+                diarize=False,  # Отключаем диаризацию для одного говорящего
+            ),
+            llm=openai.LLM(
+                model="gpt-4o-mini",
+                temperature=0.7,
+                max_tokens=150,  # Ограничиваем для быстрых ответов
+            ),
+            tts=cartesia.TTS(
+                model="sonic-multilingual",
+                language="ru",
+                voice="87748186-23bb-4158-a1eb-332911b0b708",  # Русский голос
+                speed=1.0,
+                emotion=["friendly", "helpful"],
+            ),
+            chat_ctx=chat_context,
+        )
+        
+        # Добавляем функции ассистенту
+        assistant.fnc_ctx.ai_functions.extend([
+            llm.FunctionContext(
+                get_weather,
+                description="Получить информацию о погоде в указанном городе России",
+            ),
+            llm.FunctionContext(
+                get_current_time,
+                description="Получить текущее время в Москве",
+            ),
+            llm.FunctionContext(
+                get_company_info,
+                description="Получить информацию о компании Stellar Agents",
+            ),
+            llm.FunctionContext(
+                end_call,
+                description="Завершить звонок по просьбе пользователя",
+            ),
+        ])
+        
+        # Запускаем ассистента
+        assistant.start(ctx.room)
+        
+        logger.info(f"✅ Голосовой ассистент запущен для звонящего: {caller_id}")
+        
+        # Обработчики событий комнаты
+        @ctx.room.on("participant_connected")
+        def on_participant_connected(participant: rtc.RemoteParticipant):
+            logger.info(f"👤 Участник подключился: {participant.identity}")
+            
+            # Приветствие при подключении
+            asyncio.create_task(
+                assistant.say("Привет! Я ваш ИИ ассистент. Чем могу помочь?")
+            )
+        
+        @ctx.room.on("participant_disconnected")
+        def on_participant_disconnected(participant: rtc.RemoteParticipant):
+            logger.info(f"👋 Участник отключился: {participant.identity}")
+        
+        # Ожидаем завершения сессии
+        await asyncio.Event().wait()
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в работе голосового агента: {e}")
+        raise
+    finally:
+        logger.info("🏁 Голосовой агент завершил работу")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))

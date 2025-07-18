@@ -1,8 +1,8 @@
-livekit-agents[openai,deepgram,cartesia,silero]==1.1.6
-livekit-plugins-openai==1.1.6
-livekit-plugins-deepgram==1.1.6
-livekit-plugins-cartesia==1.1.6
-livekit-plugins-silero==1.1.6
+livekit-agents==1.2.0
+livekit-plugins-openai==1.2.0
+livekit-plugins-deepgram==1.2.0
+livekit-plugins-cartesia==1.2.0
+livekit-plugins-silero==1.2.0
 livekit-api>=1.0.3
 redis>=4.0.0
 aioredis>=2.0.0
