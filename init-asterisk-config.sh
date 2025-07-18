@@ -153,6 +153,12 @@ reload_modules() {
     fi
     
     echo "✅ Настройка модулей завершена"
+    
+    # Финальное копирование в override файл после всех перезагрузок
+    if [ -f "/etc/asterisk/extensions_custom.conf" ]; then
+        cp /etc/asterisk/extensions_custom.conf /etc/asterisk/extensions_override_freepbx.conf
+        echo "✅ Финальное копирование в extensions_override_freepbx.conf"
+    fi
 }
 
 # Проверка конфигураций
