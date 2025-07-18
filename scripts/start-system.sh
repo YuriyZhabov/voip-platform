@@ -1,38 +1,89 @@
 #!/bin/bash
 
-# Скрипт автоматического запуска и настройки VoIP системы
-# Решает проблему потери конфигураций при перезапуске
+# Универсальный скрипт управления VoIP системой
+# Объединяет все функции: запуск, обновление, тестирование, очистку
 #
 # Использование:
-#   ./scripts/start-system.sh           - обычный запуск
-#   ./scripts/start-system.sh --clean   - запуск с очисткой volumes
-#   ./scripts/start-system.sh -c        - то же самое (короткая форма)
+#   ./scripts/start-system.sh                    - обычный запуск
+#   ./scripts/start-system.sh --clean           - запуск с очисткой volumes
+#   ./scripts/start-system.sh --full-clean      - полная очистка системы
+#   ./scripts/start-system.sh --update          - обновление до аудио моста
+#   ./scripts/start-system.sh --test            - тестирование системы
+#   ./scripts/start-system.sh --rebuild         - пересборка образов
 
 set -e
 
 # Показать справку
 if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-    echo "Скрипт автоматического запуска VoIP системы"
+    echo "🎤 Универсальный скрипт управления VoIP системой"
     echo ""
     echo "Использование:"
-    echo "  $0 [ОПЦИИ]"
+    echo "  $0 [РЕЖИМ] [ОПЦИИ]"
     echo ""
-    echo "Опции:"
-    echo "  -c, --clean    Очистить volumes перед запуском"
-    echo "  -h, --help     Показать эту справку"
+    echo "Режимы работы:"
+    echo "  (без параметров)   Обычный запуск системы"
+    echo "  --clean, -c        Запуск с очисткой volumes"
+    echo "  --full-clean       Полная очистка системы (УДАЛЯЕТ ВСЕ ДАННЫЕ!)"
+    echo "  --update           Обновление до версии с аудио мостом"
+    echo "  --test             Тестирование всех компонентов системы"
+    echo "  --rebuild          Пересборка Docker образов"
+    echo "  --status           Показать статус системы"
     echo ""
     echo "Примеры:"
-    echo "  $0              # Обычный запуск"
-    echo "  $0 --clean      # Запуск с очисткой данных"
+    echo "  $0                 # Обычный запуск"
+    echo "  $0 --clean         # Запуск с очисткой"
+    echo "  $0 --full-clean    # Полная очистка (осторожно!)"
+    echo "  $0 --update        # Обновление системы"
+    echo "  $0 --test          # Тестирование"
+    echo ""
+    echo "🎯 Для первой установки рекомендуется:"
+    echo "  $0 --full-clean && $0 --update"
     exit 0
 fi
 
-# Параметры командной строки
+# Определение режима работы
+MODE="start"
 CLEAN_VOLUMES=false
-if [ "$1" = "--clean" ] || [ "$1" = "-c" ]; then
-    CLEAN_VOLUMES=true
-    shift
-fi
+FULL_CLEAN=false
+UPDATE_MODE=false
+TEST_MODE=false
+REBUILD_MODE=false
+STATUS_MODE=false
+
+case "$1" in
+    --clean|-c)
+        MODE="start"
+        CLEAN_VOLUMES=true
+        ;;
+    --full-clean)
+        MODE="full-clean"
+        FULL_CLEAN=true
+        ;;
+    --update)
+        MODE="update"
+        UPDATE_MODE=true
+        ;;
+    --test)
+        MODE="test"
+        TEST_MODE=true
+        ;;
+    --rebuild)
+        MODE="rebuild"
+        REBUILD_MODE=true
+        ;;
+    --status)
+        MODE="status"
+        STATUS_MODE=true
+        ;;
+    "")
+        MODE="start"
+        ;;
+    *)
+        echo "❌ Неизвестный параметр: $1"
+        echo "Используйте --help для справки"
+        exit 1
+        ;;
+esac
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -62,14 +113,22 @@ clean_volumes() {
     log "🧹 Очистка старых volumes..."
     
     # Остановка и удаление контейнеров с volumes
-    if docker-compose ps -q | grep -q .; then
+    if docker-compose ps -q 2>/dev/null | grep -q .; then
         log "Остановка контейнеров..."
-        docker-compose down -v
+        docker-compose down -v --remove-orphans
     fi
+    
+    # Удаление всех volumes проекта
+    log "Удаление volumes проекта..."
+    docker volume ls -q | grep -E "(voip-platform|freepbx|livekit|traefik|redis)" | xargs -r docker volume rm -f 2>/dev/null || true
     
     # Удаление неиспользуемых volumes
     log "Удаление неиспользуемых volumes..."
     docker volume prune -f
+    
+    # Удаление неиспользуемых сетей
+    log "Удаление неиспользуемых сетей..."
+    docker network prune -f
     
     log "✅ Volumes очищены"
 }
@@ -207,8 +266,16 @@ restore_dialplan() {
         return 1
     fi
     
+    # Создаем файл extensions_custom.conf если его нет
+    docker exec freepbx-server bash -c '
+        if [ ! -f /etc/asterisk/extensions_custom.conf ]; then
+            touch /etc/asterisk/extensions_custom.conf
+            echo "Файл extensions_custom.conf создан"
+        fi
+    '
+    
     # Проверяем, нет ли уже дублирующих контекстов в extensions_custom.conf
-    if docker exec freepbx-server grep -q "\[from-novofon\]" /etc/asterisk/extensions_custom.conf; then
+    if docker exec freepbx-server grep -q "\[from-novofon\]" /etc/asterisk/extensions_custom.conf 2>/dev/null; then
         log "⚠️ Контекст from-novofon уже существует в extensions_custom.conf"
         # Просто перезагружаем диалплан
         docker exec freepbx-server asterisk -rx "dialplan reload" >/dev/null 2>&1
@@ -397,11 +464,219 @@ show_system_info() {
     echo "  - Тест системы: ./scripts/test_system.sh"
 }
 
-# Основная функция
-main() {
-    log "🚀 === АВТОМАТИЧЕСКИЙ ЗАПУСК VoIP СИСТЕМЫ ==="
+# Функция полной очистки системы
+full_cleanup() {
+    log "🧹 === ПОЛНАЯ ОЧИСТКА VOIP СИСТЕМЫ ==="
     
-    # Очистка volumes если запрошено
+    if [ "$FULL_CLEAN" != true ]; then
+        warn "⚠️  ВНИМАНИЕ: Этот режим удалит ВСЕ данные VoIP системы!"
+        warn "⚠️  Включая базы данных, конфигурации, логи и записи звонков!"
+        echo ""
+        read -p "Вы уверены? Введите 'YES' для подтверждения: " confirmation
+        
+        if [ "$confirmation" != "YES" ]; then
+            log "Операция отменена"
+            exit 0
+        fi
+    fi
+    
+    # Остановка всех контейнеров
+    log "🛑 Остановка всех контейнеров..."
+    docker-compose down -v --remove-orphans 2>/dev/null || true
+    
+    # Удаление образов проекта
+    log "🗑️ Удаление образов проекта..."
+    docker images | grep -E "(voip-platform|freepbx|livekit|tiredofit)" | awk '{print $3}' | sort -u | xargs -r docker rmi -f 2>/dev/null || true
+    
+    # Удаление volumes
+    log "📦 Удаление всех volumes..."
+    docker volume ls -q | grep -E "(voip-platform|freepbx|livekit|traefik|redis|asterisk|mariadb)" | xargs -r docker volume rm -f 2>/dev/null || true
+    
+    # Полная очистка Docker
+    log "🧽 Полная очистка Docker..."
+    docker system prune -af --volumes
+    
+    # Удаление данных файловой системы
+    log "🗂️ Удаление данных файловой системы..."
+    sudo rm -rf ./data/* 2>/dev/null || rm -rf ./data/* 2>/dev/null || true
+    sudo rm -rf ./volumes/* 2>/dev/null || rm -rf ./volumes/* 2>/dev/null || true
+    
+    # Создание чистой структуры
+    log "📁 Создание чистой структуры директорий..."
+    mkdir -p ./data/{freepbx,asterisk,logs,agent}
+    mkdir -p ./data/logs/{agent,asterisk,freepbx}
+    mkdir -p ./volumes/{asterisk-db,recordings}
+    mkdir -p ./ssl/{certs,private}
+    
+    log "✅ Полная очистка завершена"
+}
+
+# Функция обновления системы
+update_system() {
+    log "🔄 === ОБНОВЛЕНИЕ СИСТЕМЫ ДО АУДИО МОСТА ==="
+    
+    # Проверка переменных окружения
+    check_environment_variables
+    
+    # Полная очистка для чистой установки
+    log "🧹 Полная очистка для чистой установки..."
+    FULL_CLEAN=true
+    full_cleanup
+    
+    # Пересборка образов
+    log "🔨 Пересборка образов..."
+    docker-compose build --no-cache livekit-agent
+    
+    # Запуск обновленной системы
+    log "🚀 Запуск обновленной системы..."
+    start_system
+    
+    log "🎉 === ОБНОВЛЕНИЕ ЗАВЕРШЕНО ==="
+}
+
+# Функция тестирования системы
+test_system() {
+    log "🧪 === ТЕСТИРОВАНИЕ СИСТЕМЫ ==="
+    
+    local tests_passed=0
+    local tests_failed=0
+    
+    # Тест 1: Контейнеры
+    if docker-compose ps | grep -q 'Up'; then
+        log "✅ PASSED: Контейнеры запущены"
+        ((tests_passed++))
+    else
+        error "❌ FAILED: Контейнеры не запущены"
+        ((tests_failed++))
+    fi
+    
+    # Тест 2: FreePBX
+    if docker exec freepbx-server asterisk -rx 'core show version' >/dev/null 2>&1; then
+        log "✅ PASSED: FreePBX доступен"
+        ((tests_passed++))
+    else
+        error "❌ FAILED: FreePBX недоступен"
+        ((tests_failed++))
+    fi
+    
+    # Тест 3: LiveKit агент
+    if curl -s http://localhost:8081/health | grep -q 'healthy' 2>/dev/null; then
+        log "✅ PASSED: LiveKit агент работает"
+        ((tests_passed++))
+    else
+        error "❌ FAILED: LiveKit агент не отвечает"
+        ((tests_failed++))
+    fi
+    
+    # Тест 4: ARI приложение
+    if docker exec freepbx-server asterisk -rx 'ari show apps' | grep -q 'livekit-agent' 2>/dev/null; then
+        log "✅ PASSED: ARI приложение зарегистрировано"
+        ((tests_passed++))
+    else
+        error "❌ FAILED: ARI приложение не зарегистрировано"
+        ((tests_failed++))
+    fi
+    
+    # Тест 5: Диалплан
+    if docker exec freepbx-server asterisk -rx 'dialplan show from-novofon' | grep -q '79952227978' 2>/dev/null; then
+        log "✅ PASSED: Диалплан загружен"
+        ((tests_passed++))
+    else
+        error "❌ FAILED: Диалплан не найден"
+        ((tests_failed++))
+    fi
+    
+    log "📊 === РЕЗУЛЬТАТЫ ТЕСТИРОВАНИЯ ==="
+    log "✅ Пройдено тестов: $tests_passed"
+    if [ $tests_failed -gt 0 ]; then
+        error "❌ Провалено тестов: $tests_failed"
+        return 1
+    else
+        log "🎉 Все тесты пройдены успешно!"
+        return 0
+    fi
+}
+
+# Функция пересборки образов
+rebuild_images() {
+    log "🔨 === ПЕРЕСБОРКА ОБРАЗОВ ==="
+    
+    # Остановка контейнеров
+    docker-compose down
+    
+    # Удаление старых образов
+    docker images | grep -E "(voip-platform)" | awk '{print $3}' | xargs -r docker rmi -f 2>/dev/null || true
+    
+    # Пересборка
+    docker-compose build --no-cache
+    
+    log "✅ Образы пересобраны"
+}
+
+# Функция показа статуса
+show_status() {
+    log "📊 === СТАТУС СИСТЕМЫ ==="
+    
+    echo ""
+    info "🐳 Статус контейнеров:"
+    docker-compose ps 2>/dev/null || echo "Контейнеры не запущены"
+    
+    echo ""
+    info "🤖 Статус LiveKit агента:"
+    curl -s http://localhost:8081/status 2>/dev/null | head -10 || echo "LiveKit агент недоступен"
+    
+    echo ""
+    info "📞 ARI приложения:"
+    docker exec freepbx-server asterisk -rx "ari show apps" 2>/dev/null || echo "ARI недоступен"
+    
+    echo ""
+    info "🔊 Последние логи агента:"
+    docker logs livekit-agent --tail=5 2>/dev/null || echo "Логи недоступны"
+}
+
+# Функция проверки переменных окружения
+check_environment_variables() {
+    log "🔍 Проверка переменных окружения..."
+    
+    if [ ! -f ".env" ]; then
+        warn "Файл .env не найден. Создаю из .env.example"
+        cp .env.example .env
+        warn "⚠️ Отредактируйте файл .env с вашими настройками!"
+    fi
+    
+    local required_vars=(
+        "LIVEKIT_URL"
+        "LIVEKIT_API_KEY"
+        "LIVEKIT_API_SECRET"
+        "OPENAI_API_KEY"
+        "DEEPGRAM_API_KEY"
+        "CARTESIA_API_KEY"
+    )
+    
+    local missing_vars=()
+    for var in "${required_vars[@]}"; do
+        if ! grep -q "^${var}=" .env 2>/dev/null || grep -q "^${var}=$" .env 2>/dev/null; then
+            missing_vars+=("$var")
+        fi
+    done
+    
+    if [ ${#missing_vars[@]} -gt 0 ]; then
+        error "❌ Отсутствуют переменные в .env:"
+        for var in "${missing_vars[@]}"; do
+            error "  - $var"
+        done
+        error "Заполните эти переменные перед продолжением"
+        exit 1
+    fi
+    
+    log "✅ Все переменные окружения настроены"
+}
+
+# Функция запуска системы
+start_system() {
+    log "🚀 === ЗАПУСК VoIP СИСТЕМЫ ==="
+    
+    # Очистка если запрошено
     if [ "$CLEAN_VOLUMES" = true ]; then
         clean_volumes
     fi
@@ -413,52 +688,72 @@ main() {
     log "📦 Запуск контейнеров..."
     docker-compose up -d
     
-    # Ожидание готовности LiveKit агента
-    if ! wait_for_container "livekit-agent"; then
-        error "Не удалось запустить LiveKit агент"
-        exit 1
+    # Ожидание готовности компонентов
+    wait_for_components
+    
+    # Применение конфигураций
+    apply_asterisk_configs
+    
+    # Финальная проверка
+    check_system_status
+    
+    # Показать информацию
+    show_system_info
+    
+    log "🎯 === СИСТЕМА ГОТОВА К РАБОТЕ ==="
+}
+
+# Функция ожидания компонентов
+wait_for_components() {
+    # LiveKit агент
+    if ! wait_for_livekit_agent; then
+        warn "LiveKit агент не готов, но продолжаем..."
     fi
     
-    # Ожидание завершения установки FreePBX
+    # FreePBX
     if ! wait_for_freepbx; then
         error "FreePBX не готов к работе"
         exit 1
     fi
     
-    # Ожидание готовности Asterisk
+    # Asterisk
     if ! wait_for_asterisk; then
         error "Asterisk не готов к работе"
         exit 1
     fi
     
-    # Применение конфигураций
-    if ! apply_asterisk_configs; then
-        error "Не удалось применить конфигурации Asterisk"
-        exit 1
-    fi
-    
-    # Пауза для стабилизации системы
-    log "⏳ Ожидание стабилизации системы..."
-    sleep 20
-    
-    # Ожидание готовности LiveKit агента
-    if ! wait_for_livekit_agent; then
-        warn "LiveKit агент не готов, но продолжаем..."
-    fi
-    
-    # Проверка ARI интеграции
+    # ARI интеграция
     if ! check_ari_integration; then
         warn "ARI интеграция не готова, но продолжаем..."
     fi
-    
-    # Финальная проверка
-    sleep 5
-    check_system_status
-    
-    # Показать информацию о системе
-    show_system_info
-    
-    log "🎯 === СИСТЕМА ГОТОВА К РАБОТЕ ==="
+}
+
+# Основная функция
+main() {
+    case "$MODE" in
+        "start")
+            start_system
+            ;;
+        "full-clean")
+            full_cleanup
+            ;;
+        "update")
+            update_system
+            ;;
+        "test")
+            test_system
+            ;;
+        "rebuild")
+            rebuild_images
+            ;;
+        "status")
+            show_status
+            ;;
+        *)
+            error "Неизвестный режим: $MODE"
+            exit 1
+            ;;
+    esac
 }
 
 # Обработка сигналов

@@ -3,7 +3,7 @@ livekit-plugins-openai==1.1.6
 livekit-plugins-deepgram==1.1.6
 livekit-plugins-cartesia==1.1.6
 livekit-plugins-silero==1.1.6
-livekit-api>=1.1.6
+livekit-api>=1.0.3
 redis>=4.0.0
 aioredis>=2.0.0
 aiohttp>=3.8.0

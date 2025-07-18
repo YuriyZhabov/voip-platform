@@ -8,13 +8,19 @@ import asyncio
 import logging
 import os
 import sys
+import json
 from pathlib import Path
+from typing import Dict, Optional
 
 # Добавляем текущую директорию в путь для импортов
 sys.path.append(str(Path(__file__).parent))
 
-from audio_bridge import AudioBridge
+import aiohttp
 from aiohttp import web
+from livekit import api, rtc
+from livekit.agents import JobContext, WorkerOptions, cli
+from livekit.agents.voice_assistant import VoiceAssistant
+from livekit.plugins import deepgram, openai, cartesia, silero
 
 # Настройка логирования
 logging.basicConfig(
@@ -31,9 +37,22 @@ class MainAgent:
     """Главный агент системы"""
     
     def __init__(self):
-        self.audio_bridge = AudioBridge()
+        # Настройки ARI
+        self.ari_url = os.getenv('ARI_URL', 'http://freepbx-server:8088')
+        self.ari_username = os.getenv('ARI_USERNAME', 'livekit-agent')
+        self.ari_password = os.getenv('ARI_PASSWORD', 'livekit_ari_secret')
+        
+        # LiveKit настройки
+        self.livekit_url = os.getenv('LIVEKIT_URL')
+        self.livekit_api_key = os.getenv('LIVEKIT_API_KEY')
+        self.livekit_api_secret = os.getenv('LIVEKIT_API_SECRET')
+        
+        # Состояние
         self.health_server = None
         self.running = False
+        self.ari_ws = None
+        self.session = None
+        self.active_channels: Dict[str, Dict] = {}
         
     async def start(self):
         """Запуск главного агента"""
@@ -48,11 +67,11 @@ class MainAgent:
             # Запускаем HTTP сервер для health check
             await self.start_health_server()
             
-            # Запускаем аудио мост
-            bridge_task = asyncio.create_task(self.audio_bridge.start())
+            # Создаем HTTP сессию
+            self.session = aiohttp.ClientSession()
             
-            # Запускаем периодическую проверку работоспособности
-            health_task = asyncio.create_task(self.audio_bridge.periodic_health_check())
+            # Запускаем ARI клиент
+            ari_task = asyncio.create_task(self.start_ari_client())
             
             # Запускаем мониторинг системы
             monitor_task = asyncio.create_task(self.system_monitor())
@@ -61,7 +80,7 @@ class MainAgent:
             
             # Ожидаем завершения любой из задач
             done, pending = await asyncio.wait(
-                [bridge_task, health_task, monitor_task],
+                [ari_task, monitor_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
             
@@ -217,14 +236,199 @@ class MainAgent:
         except Exception as e:
             logger.error(f"Ошибка мониторинга системы: {e}")
     
+    async def start_ari_client(self):
+        """Запуск ARI клиента"""
+        try:
+            logger.info("🔌 Подключение к ARI...")
+            
+            # Ожидаем готовности Asterisk
+            await self.wait_for_asterisk()
+            
+            # Подключаемся к ARI WebSocket
+            await self.connect_to_ari()
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка ARI клиента: {e}")
+            raise
+    
+    async def wait_for_asterisk(self):
+        """Ожидание готовности Asterisk"""
+        max_attempts = 30
+        for attempt in range(max_attempts):
+            try:
+                url = f"{self.ari_url}/ari/asterisk/info"
+                async with self.session.get(
+                    url,
+                    auth=aiohttp.BasicAuth(self.ari_username, self.ari_password)
+                ) as response:
+                    if response.status == 200:
+                        logger.info("✅ Asterisk готов")
+                        return
+            except Exception:
+                pass
+            
+            await asyncio.sleep(2)
+        
+        raise Exception("Asterisk не готов")
+    
+    async def connect_to_ari(self):
+        """Подключение к ARI WebSocket"""
+        ws_url = f"{self.ari_url}/ari/events"
+        params = {
+            'api_key': self.ari_username,
+            'api_secret': self.ari_password,
+            'app': 'livekit-agent'
+        }
+        
+        logger.info(f"🔌 Подключение к ARI WebSocket: {ws_url}")
+        
+        try:
+            self.ari_ws = await self.session.ws_connect(
+                ws_url,
+                params=params,
+                auth=aiohttp.BasicAuth(self.ari_username, self.ari_password)
+            )
+            
+            logger.info("✅ ARI WebSocket подключен")
+            await self.handle_ari_events()
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к ARI: {e}")
+            raise
+    
+    async def handle_ari_events(self):
+        """Обработка событий от ARI"""
+        logger.info("👂 Начало прослушивания ARI событий...")
+        
+        try:
+            async for msg in self.ari_ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        event = json.loads(msg.data)
+                        await self.process_ari_event(event)
+                    except Exception as e:
+                        logger.error(f"Ошибка обработки события: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Ошибка в обработке ARI событий: {e}")
+    
+    async def process_ari_event(self, event: Dict):
+        """Обработка ARI события"""
+        event_type = event.get('type')
+        
+        if event_type == 'StasisStart':
+            await self.handle_call_start(event)
+        elif event_type == 'StasisEnd':
+            await self.handle_call_end(event)
+    
+    async def handle_call_start(self, event: Dict):
+        """Обработка начала звонка"""
+        channel = event.get('channel', {})
+        channel_id = channel.get('id')
+        caller_id = channel.get('caller', {}).get('number', 'Unknown')
+        
+        logger.info(f"📞 Новый звонок: {caller_id} -> канал {channel_id}")
+        
+        # Сохраняем информацию о канале
+        self.active_channels[channel_id] = {
+            'id': channel_id,
+            'caller_id': caller_id,
+            'state': channel.get('state'),
+            'start_time': asyncio.get_event_loop().time()
+        }
+        
+        # Отвечаем на звонок
+        await self.answer_channel(channel_id)
+        
+        # Воспроизводим приветствие
+        await self.play_greeting(channel_id)
+        
+        # Имитируем работу ИИ агента
+        await self.simulate_ai_conversation(channel_id)
+    
+    async def handle_call_end(self, event: Dict):
+        """Обработка завершения звонка"""
+        channel = event.get('channel', {})
+        channel_id = channel.get('id')
+        
+        logger.info(f"📞 Завершение звонка для канала {channel_id}")
+        
+        if channel_id in self.active_channels:
+            del self.active_channels[channel_id]
+    
+    async def answer_channel(self, channel_id: str):
+        """Ответ на звонок"""
+        try:
+            url = f"{self.ari_url}/ari/channels/{channel_id}/answer"
+            async with self.session.post(
+                url,
+                auth=aiohttp.BasicAuth(self.ari_username, self.ari_password)
+            ) as response:
+                if response.status == 204:
+                    logger.info(f"✅ Канал {channel_id} отвечен")
+                else:
+                    logger.error(f"❌ Ошибка ответа: {response.status}")
+        except Exception as e:
+            logger.error(f"Ошибка ответа на канал: {e}")
+    
+    async def play_greeting(self, channel_id: str):
+        """Воспроизведение приветствия"""
+        try:
+            url = f"{self.ari_url}/ari/channels/{channel_id}/play"
+            data = {"media": "sound:hello-world"}
+            
+            async with self.session.post(
+                url,
+                auth=aiohttp.BasicAuth(self.ari_username, self.ari_password),
+                json=data
+            ) as response:
+                if response.status == 201:
+                    logger.info(f"🎵 Приветствие воспроизводится для {channel_id}")
+                else:
+                    logger.error(f"❌ Ошибка воспроизведения: {response.status}")
+        except Exception as e:
+            logger.error(f"Ошибка воспроизведения: {e}")
+    
+    async def simulate_ai_conversation(self, channel_id: str):
+        """Имитация ИИ разговора"""
+        try:
+            logger.info(f"🤖 Имитация ИИ разговора для {channel_id}")
+            
+            # Ждем 10 секунд для демонстрации
+            await asyncio.sleep(10)
+            
+            # Завершаем звонок
+            await self.hangup_channel(channel_id)
+            
+        except Exception as e:
+            logger.error(f"Ошибка имитации разговора: {e}")
+    
+    async def hangup_channel(self, channel_id: str):
+        """Завершение звонка"""
+        try:
+            url = f"{self.ari_url}/ari/channels/{channel_id}"
+            async with self.session.delete(
+                url,
+                auth=aiohttp.BasicAuth(self.ari_username, self.ari_password)
+            ) as response:
+                if response.status == 204:
+                    logger.info(f"📞 Канал {channel_id} завершен")
+        except Exception as e:
+            logger.error(f"Ошибка завершения канала: {e}")
+    
     async def cleanup(self):
         """Очистка ресурсов"""
         logger.info("🧹 Завершение работы главного агента...")
         
         self.running = False
         
-        # Очищаем ресурсы аудио моста
-        await self.audio_bridge.cleanup()
+        # Закрываем WebSocket
+        if self.ari_ws:
+            await self.ari_ws.close()
+        
+        # Закрываем HTTP сессию
+        if self.session:
+            await self.session.close()
         
         logger.info("✅ Главный агент остановлен")
 
