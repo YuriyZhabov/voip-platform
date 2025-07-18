@@ -2,8 +2,37 @@
 
 # Скрипт автоматического запуска и настройки VoIP системы
 # Решает проблему потери конфигураций при перезапуске
+#
+# Использование:
+#   ./scripts/start-system.sh           - обычный запуск
+#   ./scripts/start-system.sh --clean   - запуск с очисткой volumes
+#   ./scripts/start-system.sh -c        - то же самое (короткая форма)
 
 set -e
+
+# Показать справку
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Скрипт автоматического запуска VoIP системы"
+    echo ""
+    echo "Использование:"
+    echo "  $0 [ОПЦИИ]"
+    echo ""
+    echo "Опции:"
+    echo "  -c, --clean    Очистить volumes перед запуском"
+    echo "  -h, --help     Показать эту справку"
+    echo ""
+    echo "Примеры:"
+    echo "  $0              # Обычный запуск"
+    echo "  $0 --clean      # Запуск с очисткой данных"
+    exit 0
+fi
+
+# Параметры командной строки
+CLEAN_VOLUMES=false
+if [ "$1" = "--clean" ] || [ "$1" = "-c" ]; then
+    CLEAN_VOLUMES=true
+    shift
+fi
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -26,6 +55,37 @@ error() {
 
 info() {
     echo -e "${BLUE}[$(date +'%H:%M:%S')] INFO: $1${NC}"
+}
+
+# Очистка volumes
+clean_volumes() {
+    log "🧹 Очистка старых volumes..."
+    
+    # Остановка и удаление контейнеров с volumes
+    if docker-compose ps -q | grep -q .; then
+        log "Остановка контейнеров..."
+        docker-compose down -v
+    fi
+    
+    # Удаление неиспользуемых volumes
+    log "Удаление неиспользуемых volumes..."
+    docker volume prune -f
+    
+    log "✅ Volumes очищены"
+}
+
+# Подготовка инфраструктуры
+prepare_infrastructure() {
+    log "🔧 Подготовка инфраструктуры..."
+    
+    # Создание внешней сети traefik-public если она не существует
+    if ! docker network ls | grep -q "traefik-public"; then
+        log "Создание сети traefik-public..."
+        docker network create traefik-public
+        log "✅ Сеть traefik-public создана"
+    else
+        log "✅ Сеть traefik-public уже существует"
+    fi
 }
 
 # Проверка готовности контейнера
@@ -122,6 +182,23 @@ wait_for_asterisk() {
 apply_asterisk_configs() {
     log "📋 Применение конфигураций Asterisk..."
     
+    # Настройка ARI конфигурации с паролем
+    log "🔧 Настройка ARI конфигурации..."
+    docker exec freepbx-server bash -c 'cat > /etc/asterisk/ari.conf << EOF
+[general]
+enabled = yes
+pretty = yes
+allowed_origins = *
+
+[livekit-agent]
+type = user
+read_only = no
+password = livekit_ari_secret
+EOF'
+    
+    # Перезагрузка модуля ARI
+    docker exec freepbx-server asterisk -rx "module reload res_ari.so" >/dev/null 2>&1
+    
     # Запуск скрипта инициализации внутри контейнера
     if docker exec freepbx-server /usr/local/bin/init-asterisk-config.sh; then
         log "✅ Конфигурации Asterisk применены"
@@ -136,24 +213,51 @@ apply_asterisk_configs() {
 start_ari_client() {
     log "🚀 Запуск ARI клиента..."
     
-    # Проверяем, не запущен ли уже ARI клиент
-    if docker exec livekit-agent pgrep -f "persistent_ari.py" >/dev/null 2>&1; then
-        warn "ARI клиент уже запущен"
-        return 0
+    # Копируем исправленный ARI клиент в контейнер
+    log "📋 Копирование исправленного ARI клиента..."
+    if [ -f "./fixed_ari_client.py" ]; then
+        docker cp ./fixed_ari_client.py livekit-agent:/app/fixed_ari_client.py
+        log "✅ Исправленный ARI клиент скопирован"
+    else
+        warn "⚠️ Файл fixed_ari_client.py не найден, используем стандартный клиент"
+    fi
+    
+    # Останавливаем старые процессы ARI клиента
+    docker exec livekit-agent pkill -f "ari_client.py" >/dev/null 2>&1 || true
+    docker exec livekit-agent pkill -f "persistent_ari.py" >/dev/null 2>&1 || true
+    docker exec livekit-agent pkill -f "fixed_ari_client.py" >/dev/null 2>&1 || true
+    
+    # Ждем завершения процессов
+    sleep 2
+    
+    # Определяем какой клиент запускать
+    local ari_client="/app/fixed_ari_client.py"
+    if [ ! -f "./fixed_ari_client.py" ]; then
+        ari_client="/app/persistent_ari.py"
     fi
     
     # Запускаем ARI клиент в фоновом режиме
-    if docker exec -d livekit-agent python /app/persistent_ari.py; then
-        sleep 3
+    log "🔄 Запуск ARI клиента: $ari_client"
+    if docker exec -d livekit-agent python $ari_client; then
+        sleep 5
         
         # Проверяем регистрацию ARI приложения
-        if docker exec freepbx-server asterisk -rx "ari show apps" | grep -q "livekit-agent"; then
-            log "✅ ARI клиент запущен и зарегистрирован"
-            return 0
-        else
-            warn "⚠️ ARI клиент запущен, но приложение не зарегистрировано"
-            return 1
-        fi
+        local max_attempts=10
+        local attempt=0
+        
+        while [ $attempt -lt $max_attempts ]; do
+            if docker exec freepbx-server asterisk -rx "ari show apps" | grep -q "livekit-agent"; then
+                log "✅ ARI клиент запущен и зарегистрирован"
+                return 0
+            fi
+            
+            echo -n "."
+            sleep 2
+            ((attempt++))
+        done
+        
+        warn "⚠️ ARI клиент запущен, но приложение не зарегистрировано после $max_attempts попыток"
+        return 1
     else
         error "❌ Ошибка запуска ARI клиента"
         return 1
@@ -242,6 +346,14 @@ show_system_info() {
 # Основная функция
 main() {
     log "🚀 === АВТОМАТИЧЕСКИЙ ЗАПУСК VoIP СИСТЕМЫ ==="
+    
+    # Очистка volumes если запрошено
+    if [ "$CLEAN_VOLUMES" = true ]; then
+        clean_volumes
+    fi
+    
+    # Подготовка инфраструктуры
+    prepare_infrastructure
     
     # Запуск контейнеров
     log "📦 Запуск контейнеров..."
