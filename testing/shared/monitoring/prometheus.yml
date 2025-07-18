@@ -1,0 +1,65 @@
+# Конфигурация Prometheus для мониторинга тестовых сред VoIP
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # Мониторинг самого Prometheus
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Мониторинг системных метрик
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # Мониторинг Docker контейнеров
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  # Мониторинг тестовой среды A
+  - job_name: 'test-env-a'
+    static_configs:
+      - targets: 
+        - 'host.docker.internal:8081'  # HTTP порт среды A
+        - 'host.docker.internal:6371'  # Redis среды A
+    scrape_interval: 30s
+    metrics_path: '/metrics'
+    scrape_timeout: 10s
+
+  # Мониторинг тестовой среды B
+  - job_name: 'test-env-b'
+    static_configs:
+      - targets: 
+        - 'host.docker.internal:8082'  # HTTP порт среды B
+        - 'host.docker.internal:6372'  # Redis среды B
+    scrape_interval: 30s
+    metrics_path: '/metrics'
+    scrape_timeout: 10s
+
+  # Мониторинг тестовой среды C
+  - job_name: 'test-env-c'
+    static_configs:
+      - targets: 
+        - 'host.docker.internal:8083'  # HTTP порт среды C
+        - 'host.docker.internal:6373'  # Redis среды C
+    scrape_interval: 30s
+    metrics_path: '/metrics'
+    scrape_timeout: 10s
+
+  # Мониторинг SIP портов (если доступны метрики)
+  - job_name: 'sip-monitoring'
+    static_configs:
+      - targets:
+        - 'host.docker.internal:5081'  # SIP среды A
+        - 'host.docker.internal:5082'  # SIP среды B
+        - 'host.docker.internal:5083'  # SIP среды C
+    scrape_interval: 60s
+    scrape_timeout: 15s
